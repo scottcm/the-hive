@@ -23,10 +23,14 @@ def _serialize_task_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _fetch_task_by_id(task_id: int, *, include_pending_clarifications: bool) -> dict[str, Any]:
-    pool = await get_pool()
-    async with pool.connection() as conn:
-        cursor = conn.cursor(row_factory=dict_row)
+async def _fetch_task_by_id(
+    task_id: int,
+    *,
+    include_pending_clarifications: bool,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    async def _do_fetch(c: Any) -> dict[str, Any]:
+        cursor = c.cursor(row_factory=dict_row)
         await cursor.execute(
             """
             SELECT
@@ -53,7 +57,7 @@ async def _fetch_task_by_id(task_id: int, *, include_pending_clarifications: boo
 
         task = _serialize_task_row(row)
         if include_pending_clarifications:
-            clarification_cursor = conn.cursor(row_factory=dict_row)
+            clarification_cursor = c.cursor(row_factory=dict_row)
             await clarification_cursor.execute(
                 """
                 SELECT id, question, status
@@ -72,6 +76,13 @@ async def _fetch_task_by_id(task_id: int, *, include_pending_clarifications: boo
                 for clarification in await clarification_cursor.fetchall()
             ]
         return task
+
+    if conn is not None:
+        return await _do_fetch(conn)
+
+    pool = await get_pool()
+    async with pool.connection() as new_conn:
+        return await _do_fetch(new_conn)
 
 
 async def get_current_task(assigned_to: str) -> dict[str, Any] | None:
@@ -254,7 +265,9 @@ async def update_task(
         if row is None:
             raise ValueError(f"Task {task_id} not found")
 
-    return await _fetch_task_by_id(task_id, include_pending_clarifications=True)
+        return await _fetch_task_by_id(
+            task_id, include_pending_clarifications=True, conn=conn
+        )
 
 
 async def create_task(
@@ -300,4 +313,6 @@ async def create_task(
         assert row is not None
         task_id = row["id"]
 
-    return await _fetch_task_by_id(task_id, include_pending_clarifications=False)
+        return await _fetch_task_by_id(
+            task_id, include_pending_clarifications=False, conn=conn
+        )

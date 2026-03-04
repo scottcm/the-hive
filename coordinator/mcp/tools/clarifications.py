@@ -20,38 +20,39 @@ def _serialize_clarification_row(row: dict[str, Any]) -> dict[str, Any]:
 async def create_clarification(task_id: int, asked_by: str, question: str) -> dict[str, Any]:
     pool = await get_pool()
     async with pool.connection() as conn:
-        task_cursor = conn.cursor(row_factory=dict_row)
-        await task_cursor.execute(
-            """
-            UPDATE hive.tasks
-            SET status = 'blocked', updated_at = now()
-            WHERE id = %s
-            RETURNING id
-            """,
-            (task_id,),
-        )
-        if await task_cursor.fetchone() is None:
-            raise ValueError(f"Task {task_id} not found")
+        async with conn.transaction():
+            task_cursor = conn.cursor(row_factory=dict_row)
+            await task_cursor.execute(
+                """
+                UPDATE hive.tasks
+                SET status = 'blocked', updated_at = now()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (task_id,),
+            )
+            if await task_cursor.fetchone() is None:
+                raise ValueError(f"Task {task_id} not found")
 
-        cursor = conn.cursor(row_factory=dict_row)
-        await cursor.execute(
-            """
-            INSERT INTO hive.clarifications (task_id, asked_by, question)
-            VALUES (%s, %s, %s)
-            RETURNING id, task_id, asked_by, question, answer, status, answered_at
-            """,
-            (task_id, asked_by, question),
-        )
-        row = await cursor.fetchone()
-        assert row is not None
-        clarification = _serialize_clarification_row(row)
-        return {
-            "id": clarification["id"],
-            "task_id": clarification["task_id"],
-            "asked_by": clarification["asked_by"],
-            "question": clarification["question"],
-            "status": clarification["status"],
-        }
+            cursor = conn.cursor(row_factory=dict_row)
+            await cursor.execute(
+                """
+                INSERT INTO hive.clarifications (task_id, asked_by, question)
+                VALUES (%s, %s, %s)
+                RETURNING id, task_id, asked_by, question, answer, status, answered_at
+                """,
+                (task_id, asked_by, question),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            clarification = _serialize_clarification_row(row)
+            return {
+                "id": clarification["id"],
+                "task_id": clarification["task_id"],
+                "asked_by": clarification["asked_by"],
+                "question": clarification["question"],
+                "status": clarification["status"],
+            }
 
 
 async def answer_clarification(clarification_id: int, answer: str) -> dict[str, Any]:
