@@ -1,0 +1,25 @@
+import os
+
+from mcp.server.fastmcp import FastMCP
+
+from coordinator.mcp.tools import clarifications, sections, tasks
+
+mcp = FastMCP("hive")
+
+mcp.tool()(tasks.get_current_task)
+mcp.tool()(tasks.get_next_task)
+mcp.tool()(tasks.list_tasks)
+mcp.tool()(tasks.update_task)
+mcp.tool()(tasks.create_task)
+mcp.tool()(sections.list_sections)
+mcp.tool()(sections.create_section)
+mcp.tool()(clarifications.create_clarification)
+mcp.tool()(clarifications.answer_clarification)
+
+
+if __name__ == "__main__":
+    transport = os.getenv("HIVE_TRANSPORT", "stdio")
+    if transport == "sse":
+        mcp.run(transport="sse")
+    else:
+        mcp.run(transport="stdio")
