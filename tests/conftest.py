@@ -16,13 +16,6 @@ from coordinator.db.migrate import run_migrations
 
 
 @pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
 async def db_pool():
     pool = await get_pool()
     await run_migrations(pool)
