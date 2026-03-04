@@ -9,18 +9,28 @@ TASK_STATUSES = {"open", "in_progress", "blocked", "done", "cancelled"}
 SUMMARY_SELECT = """
     SELECT
         t.id,
-        t.section_id,
+        t.milestone_id,
         t.title,
         t.description,
         t.status,
         t.assigned_to,
-        t.github_issue,
+        t.github_issues,
+        t.tags,
         t.relevant_docs,
         t.sequence_order,
-        s.name AS section_name,
-        s.description AS section_description
+        t.depends_on,
+        m.name AS milestone_name,
+        m.description AS milestone_description
     FROM hive.tasks t
-    LEFT JOIN hive.sections s ON s.id = t.section_id
+    LEFT JOIN hive.milestones m ON m.id = t.milestone_id
+"""
+
+DEPS_MET_CONDITION = """
+    NOT EXISTS (
+        SELECT 1 FROM unnest(t.depends_on) AS dep_id
+        JOIN hive.tasks dt ON dt.id = dep_id
+        WHERE dt.status NOT IN ('done', 'cancelled')
+    )
 """
 
 
@@ -31,12 +41,14 @@ def _serialize_summary_task(row: dict[str, Any]) -> dict[str, Any]:
         "description": row["description"],
         "status": row["status"],
         "assigned_to": row["assigned_to"],
-        "section_id": row["section_id"],
-        "section_name": row["section_name"],
-        "section_description": row["section_description"],
-        "github_issue": row["github_issue"],
+        "milestone_id": row["milestone_id"],
+        "milestone_name": row["milestone_name"],
+        "milestone_description": row["milestone_description"],
+        "github_issues": row["github_issues"],
+        "tags": row["tags"],
         "relevant_docs": row["relevant_docs"],
         "sequence_order": row["sequence_order"],
+        "depends_on": row["depends_on"],
     }
 
 
@@ -116,7 +128,7 @@ async def get_current_task(assigned_to: str) -> dict[str, Any] | None:
               AND t.status IN ('in_progress', 'open')
             ORDER BY
                 CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END,
-                s.priority DESC NULLS LAST,
+                m.priority DESC NULLS LAST,
                 t.sequence_order,
                 t.id
             LIMIT 1
@@ -138,9 +150,10 @@ async def get_next_task(assigned_to: str) -> dict[str, Any] | None:
             {SUMMARY_SELECT}
             WHERE t.status = 'open'
               AND (t.assigned_to = %s OR t.assigned_to IS NULL)
+              AND {DEPS_MET_CONDITION}
             ORDER BY
                 CASE WHEN t.assigned_to = %s THEN 0 ELSE 1 END,
-                s.priority DESC NULLS LAST,
+                m.priority DESC NULLS LAST,
                 t.sequence_order,
                 t.id
             LIMIT 1
@@ -158,6 +171,27 @@ async def claim_task(task_id: int, assigned_to: str) -> dict[str, Any]:
     async with pool.connection() as conn:
         async with conn.transaction():
             cursor = conn.cursor(row_factory=dict_row)
+
+            # Check for unmet dependencies before allowing claim
+            await cursor.execute(
+                """
+                SELECT dt.id, dt.title, dt.status
+                FROM hive.tasks t
+                CROSS JOIN LATERAL unnest(t.depends_on) AS dep_id
+                JOIN hive.tasks dt ON dt.id = dep_id
+                WHERE t.id = %s AND dt.status NOT IN ('done', 'cancelled')
+                """,
+                (task_id,),
+            )
+            unmet = await cursor.fetchall()
+            if unmet:
+                blockers = ", ".join(
+                    f"#{r['id']} ({r['status']})" for r in unmet
+                )
+                raise ValueError(
+                    f"Task {task_id} has unmet dependencies: {blockers}"
+                )
+
             await cursor.execute(
                 """
                 UPDATE hive.tasks
@@ -196,7 +230,8 @@ async def release_task(task_id: int) -> dict[str, Any]:
 async def list_tasks(
     assigned_to: str | None = None,
     status: str | None = None,
-    section_id: int | None = None,
+    milestone_id: int | None = None,
+    tag: str | None = None,
 ) -> list[dict[str, Any]]:
     if status is not None:
         _validate_task_status(status)
@@ -210,9 +245,12 @@ async def list_tasks(
     if status is not None:
         conditions.append("t.status = %s")
         params.append(status)
-    if section_id is not None:
-        conditions.append("t.section_id = %s")
-        params.append(section_id)
+    if milestone_id is not None:
+        conditions.append("t.milestone_id = %s")
+        params.append(milestone_id)
+    if tag is not None:
+        conditions.append("%s = ANY(t.tags)")
+        params.append(tag)
 
     where_clause = ""
     if conditions:
@@ -225,7 +263,7 @@ async def list_tasks(
             f"""
             {SUMMARY_SELECT}
             {where_clause}
-            ORDER BY s.priority DESC NULLS LAST, t.sequence_order, t.id
+            ORDER BY m.priority DESC NULLS LAST, t.sequence_order, t.id
             """,
             params,
         )
@@ -274,11 +312,13 @@ async def update_task(
 async def create_task(
     title: str,
     description: str | None = None,
-    section_id: int | None = None,
+    milestone_id: int | None = None,
     assigned_to: str | None = None,
     sequence_order: int = 0,
-    github_issue: int | None = None,
+    github_issues: list[int] | None = None,
+    tags: list[str] | None = None,
     relevant_docs: list[str] | None = None,
+    depends_on: list[int] | None = None,
 ) -> dict[str, Any]:
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -290,27 +330,31 @@ async def create_task(
                     INSERT INTO hive.tasks (
                         title,
                         description,
-                        section_id,
+                        milestone_id,
                         assigned_to,
                         sequence_order,
-                        github_issue,
-                        relevant_docs
+                        github_issues,
+                        tags,
+                        relevant_docs,
+                        depends_on
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
                         title,
                         description,
-                        section_id,
+                        milestone_id,
                         assigned_to,
                         sequence_order,
-                        github_issue,
+                        github_issues or [],
+                        tags or [],
                         relevant_docs or [],
+                        depends_on or [],
                     ),
                 )
             except psycopg.errors.ForeignKeyViolation as exc:
-                raise ValueError(f"Section {section_id} not found") from exc
+                raise ValueError(f"Milestone {milestone_id} not found") from exc
 
             row = await cursor.fetchone()
             assert row is not None

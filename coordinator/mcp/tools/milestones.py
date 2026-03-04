@@ -4,26 +4,31 @@ from psycopg.rows import dict_row
 
 from coordinator.db.connection import get_pool
 
-SECTION_STATUSES = {"active", "done", "archived"}
-SECTION_SELECT = """
+MILESTONE_STATUSES = {"active", "done", "archived"}
+MILESTONE_SELECT = """
     SELECT
-        s.id,
-        s.name,
-        s.description,
-        s.priority,
-        s.status,
+        m.id,
+        m.project_id,
+        m.name,
+        m.description,
+        m.priority,
+        m.status,
+        p.name AS project_name,
         COUNT(t.id) FILTER (WHERE t.status = 'open') AS open_count,
         COUNT(t.id) FILTER (WHERE t.status = 'in_progress') AS in_progress_count,
         COUNT(t.id) FILTER (WHERE t.status = 'done') AS done_count,
         COUNT(t.id) FILTER (WHERE t.status = 'blocked') AS blocked_count
-    FROM hive.sections s
-    LEFT JOIN hive.tasks t ON t.section_id = s.id
+    FROM hive.milestones m
+    LEFT JOIN hive.projects p ON p.id = m.project_id
+    LEFT JOIN hive.tasks t ON t.milestone_id = m.id
 """
 
 
-def _serialize_section(row: dict[str, Any]) -> dict[str, Any]:
+def _serialize_milestone(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
+        "project_id": row["project_id"],
+        "project_name": row["project_name"],
         "name": row["name"],
         "description": row["description"],
         "priority": row["priority"],
@@ -37,56 +42,67 @@ def _serialize_section(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_section_status(status: str) -> None:
-    if status not in SECTION_STATUSES:
+def _validate_milestone_status(status: str) -> None:
+    if status not in MILESTONE_STATUSES:
         raise ValueError(f"Invalid status: {status}")
 
 
-async def _fetch_section(section_id: int, conn: Any) -> dict[str, Any]:
+async def _fetch_milestone(milestone_id: int, conn: Any) -> dict[str, Any]:
     cursor = conn.cursor(row_factory=dict_row)
     await cursor.execute(
         f"""
-        {SECTION_SELECT}
-        WHERE s.id = %s
-        GROUP BY s.id
+        {MILESTONE_SELECT}
+        WHERE m.id = %s
+        GROUP BY m.id, p.name
         """,
-        (section_id,),
+        (milestone_id,),
     )
     row = await cursor.fetchone()
     if row is None:
-        raise ValueError(f"Section {section_id} not found")
-    return _serialize_section(row)
+        raise ValueError(f"Milestone {milestone_id} not found")
+    return _serialize_milestone(row)
 
 
-async def list_sections(status: str | None = None) -> list[dict[str, Any]]:
+async def list_milestones(
+    status: str | None = None,
+    project_id: int | None = None,
+) -> list[dict[str, Any]]:
     if status is not None:
-        _validate_section_status(status)
+        _validate_milestone_status(status)
 
-    where_clause = ""
+    conditions: list[str] = []
     params: list[Any] = []
     if status is not None:
-        where_clause = "WHERE s.status = %s"
+        conditions.append("m.status = %s")
         params.append(status)
+    if project_id is not None:
+        conditions.append("m.project_id = %s")
+        params.append(project_id)
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
 
     pool = await get_pool()
     async with pool.connection() as conn:
         cursor = conn.cursor(row_factory=dict_row)
         await cursor.execute(
             f"""
-            {SECTION_SELECT}
+            {MILESTONE_SELECT}
             {where_clause}
-            GROUP BY s.id
-            ORDER BY s.priority DESC, s.id
+            GROUP BY m.id, p.name
+            ORDER BY m.priority DESC, m.id
             """,
             params,
         )
-        return [_serialize_section(row) for row in await cursor.fetchall()]
+        return [_serialize_milestone(row) for row in await cursor.fetchall()]
 
 
-async def create_section(
+async def create_milestone(
     name: str,
     description: str | None = None,
     priority: int = 0,
+    project_id: int | None = None,
 ) -> dict[str, Any]:
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -94,26 +110,26 @@ async def create_section(
             cursor = conn.cursor(row_factory=dict_row)
             await cursor.execute(
                 """
-                INSERT INTO hive.sections (name, description, priority)
-                VALUES (%s, %s, %s)
+                INSERT INTO hive.milestones (name, description, priority, project_id)
+                VALUES (%s, %s, %s, %s)
                 RETURNING id
                 """,
-                (name, description, priority),
+                (name, description, priority, project_id),
             )
             row = await cursor.fetchone()
             assert row is not None
-            return await _fetch_section(row["id"], conn)
+            return await _fetch_milestone(row["id"], conn)
 
 
-async def update_section(
-    section_id: int,
+async def update_milestone(
+    milestone_id: int,
     name: str | None = None,
     description: str | None = None,
     priority: int | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
     if status is not None:
-        _validate_section_status(status)
+        _validate_milestone_status(status)
 
     set_clauses = ["updated_at = now()"]
     params: list[Any] = []
@@ -131,7 +147,7 @@ async def update_section(
         set_clauses.append("status = %s")
         params.append(status)
 
-    params.append(section_id)
+    params.append(milestone_id)
 
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -139,7 +155,7 @@ async def update_section(
             cursor = conn.cursor(row_factory=dict_row)
             await cursor.execute(
                 f"""
-                UPDATE hive.sections
+                UPDATE hive.milestones
                 SET {", ".join(set_clauses)}
                 WHERE id = %s
                 RETURNING id
@@ -148,5 +164,5 @@ async def update_section(
             )
             row = await cursor.fetchone()
             if row is None:
-                raise ValueError(f"Section {section_id} not found")
-            return await _fetch_section(section_id, conn)
+                raise ValueError(f"Milestone {milestone_id} not found")
+            return await _fetch_milestone(milestone_id, conn)

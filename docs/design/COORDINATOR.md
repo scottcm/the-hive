@@ -6,20 +6,25 @@ A shared work queue for developers and AI agents. Replaces manually
 maintained session files (working_memory.md, state.md, task files) with
 a queryable Postgres store exposed via an MCP server.
 
-Primary user: one developer + three AI agents (Claude, Codex, Gemini).
-Designed to grow to multiple developers.
+Primary user: one developer + multiple AI agent sessions (Claude, Codex,
+Gemini). Each session gets a unique identity (e.g., `claude-pipeline`,
+`codex-2`). Designed to grow to multiple developers.
 
 ## Concepts
 
-**Section** — a group of related tasks (e.g., "LLM Service implementation").
-Has priority for cross-section ordering and a description that provides
-context to agents working on tasks within it.
+**Milestone** — a time-bounded collection of tasks driving toward a goal
+(e.g., "Phase 3 — System Design"). Has priority for cross-milestone
+ordering and a status lifecycle: `active` → `done` | `archived`.
+Syncs conceptually with GitHub milestones.
 
-**Task** — a unit of work within a section. Has status, sequence order
-(for ordering within a section), optional GitHub issue link, and a list
-of relevant doc paths (relative to project root). Status lifecycle:
-`open` → `in_progress` → `done` | `cancelled`. Can become `blocked` via
-clarifications.
+**Task** — a unit of work within a milestone. Has status, sequence order
+(for ordering within a milestone), optional GitHub issue links (multiple),
+freeform tags for subsystem filtering, a list of relevant doc paths
+(relative to project root), and optional dependencies on other tasks.
+Status lifecycle: `open` → `in_progress` → `done` | `cancelled`. Can
+become `blocked` via clarifications. Tasks with unmet dependencies
+(depends_on tasks not yet `done`/`cancelled`) are excluded from
+`get_next_task` and cannot be claimed.
 
 **Note** — a timestamped, attributed progress update on a task.
 Append-only. Agents and developers add notes as work progresses.
@@ -36,7 +41,7 @@ Schema name: `hive`
 ```sql
 CREATE SCHEMA IF NOT EXISTS hive;
 
-CREATE TABLE hive.sections (
+CREATE TABLE hive.milestones (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL,
     description TEXT,
@@ -49,7 +54,7 @@ CREATE TABLE hive.sections (
 
 CREATE TABLE hive.tasks (
     id             SERIAL PRIMARY KEY,
-    section_id     INTEGER REFERENCES hive.sections(id),
+    milestone_id   INTEGER REFERENCES hive.milestones(id),
     title          TEXT NOT NULL,
     description    TEXT,
     status         TEXT NOT NULL DEFAULT 'open'
@@ -57,8 +62,10 @@ CREATE TABLE hive.tasks (
                                      'done', 'cancelled')),
     sequence_order INTEGER NOT NULL DEFAULT 0,
     assigned_to    TEXT,
-    github_issue   INTEGER,
+    github_issues  INTEGER[] NOT NULL DEFAULT '{}',
+    tags           TEXT[] NOT NULL DEFAULT '{}',
     relevant_docs  TEXT[] NOT NULL DEFAULT '{}',
+    depends_on     INTEGER[] NOT NULL DEFAULT '{}',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -85,19 +92,40 @@ CREATE TABLE hive.clarifications (
 
 CREATE INDEX ON hive.tasks(status);
 CREATE INDEX ON hive.tasks(assigned_to);
-CREATE INDEX ON hive.tasks(section_id, sequence_order);
+CREATE INDEX ON hive.tasks(milestone_id, sequence_order);
 CREATE INDEX ON hive.task_notes(task_id);
 CREATE INDEX ON hive.clarifications(task_id);
 CREATE INDEX ON hive.clarifications(status);
 ```
 
-### Changes from v1 schema
+### Schema changelog
+
+**v5** (task dependencies):
+
+- **Added** `tasks.depends_on INTEGER[]` — list of task IDs that must be
+  `done` or `cancelled` before this task can be claimed. `get_next_task`
+  filters out tasks with unmet deps. `claim_task` enforces the gate with
+  an error listing the specific blockers. Tasks with no dependency
+  relationship are implicitly parallel.
+
+**v3** (milestone rename):
+
+- **Renamed** `sections` → `milestones` — aligns with GitHub terminology
+  and time-bounded goal semantics.
+- **Renamed** `tasks.section_id` → `milestone_id`.
+- **Added** `tasks.tags TEXT[]` — freeform subsystem tagging
+  (e.g., `orchestrator`, `memory`, `salience`). Filterable via
+  `list_tasks(tag=...)`.
+- **Changed** `tasks.github_issue INTEGER` → `github_issues INTEGER[]` —
+  a task can reference multiple GitHub issues.
+
+**v2** (structural cleanup):
 
 - **Removed** `sections.assigned_to` — no tool used it, semantics
   undefined. Task-level assignment is sufficient.
 - **Removed** `tasks.priority` — dead data. `get_next_task` ordered by
-  section priority + task sequence_order, never task priority. Use
-  `sequence_order` for intra-section ordering.
+  milestone priority + task sequence_order, never task priority. Use
+  `sequence_order` for intra-milestone ordering.
 - **Removed** `tasks.notes` — replaced by `task_notes` table. Single
   TEXT field had no history, no attribution, each update overwrote the
   previous.
@@ -106,7 +134,7 @@ CREATE INDEX ON hive.clarifications(status);
 ## MCP Tool Contracts
 
 All tools are async. All return plain dicts (JSON-serializable).
-14 tools total: 7 task, 1 note, 3 section, 3 clarification.
+14 tools total: 7 task, 1 note, 3 milestone, 3 clarification.
 
 ### Task Tools
 
@@ -127,15 +155,16 @@ first `open` assigned task. If none, returns `None`.
   "description": "...",
   "status": "in_progress",
   "assigned_to": "claude",
-  "section_id": 2,
-  "section_name": "LLM Service",
-  "section_description": "Implement the LLM service provider system",
-  "github_issue": 42,
-  "relevant_docs": ["docs/design/LLM_SERVICE.md"],
+  "milestone_id": 2,
+  "milestone_name": "Phase 3 — System Design",
+  "milestone_description": "Design docs and architecture",
+  "github_issues": [42, 47],
+  "tags": ["orchestrator", "salience"],
+  "relevant_docs": ["docs/design/ORCHESTRATOR_EVENT_PIPELINE.md"],
   "sequence_order": 1,
+  "depends_on": [],
   "notes": [
-    {"id": 1, "author": "scott", "content": "Use provider pattern", "created_at": "2026-03-01T10:00:00Z"},
-    {"id": 2, "author": "claude", "content": "Started implementation", "created_at": "2026-03-01T11:30:00Z"}
+    {"id": 1, "author": "scott", "content": "Use provider pattern", "created_at": "2026-03-01T10:00:00Z"}
   ],
   "pending_clarifications": [
     {"id": 3, "question": "Which auth method?", "status": "pending"}
@@ -148,9 +177,10 @@ async def get_next_task(assigned_to: str) -> dict | None
 ```
 
 Returns the next available task: first checks assigned+open tasks
-ordered by section priority desc then sequence_order asc, then falls
-back to unassigned open tasks in the same order. Returns `None` if
-nothing available.
+ordered by milestone priority desc then sequence_order asc, then falls
+back to unassigned open tasks in the same order. Tasks with unmet
+dependencies (any `depends_on` task not `done`/`cancelled`) are excluded.
+Returns `None` if nothing available.
 
 **Summary task shape** (used by `get_next_task`, `list_tasks`,
 `create_task`) — no `notes` or `pending_clarifications`:
@@ -162,12 +192,14 @@ nothing available.
   "description": "...",
   "status": "open",
   "assigned_to": null,
-  "section_id": 2,
-  "section_name": "LLM Service",
-  "section_description": "...",
-  "github_issue": null,
+  "milestone_id": 2,
+  "milestone_name": "Phase 3 — System Design",
+  "milestone_description": "...",
+  "github_issues": [],
+  "tags": ["orchestrator"],
   "relevant_docs": [],
-  "sequence_order": 1
+  "sequence_order": 1,
+  "depends_on": [3, 5]
 }
 ```
 
@@ -176,12 +208,11 @@ async def claim_task(task_id: int, assigned_to: str) -> dict
 ```
 
 Atomically sets `status='in_progress'` and `assigned_to` on a task
-that is currently `open`. Returns the full task shape. Raises
-`ValueError` if the task is not `open` (already claimed, blocked, done,
-etc.) — the agent should call `get_next_task` again and try another.
-
-Implementation: single `UPDATE ... WHERE id = %s AND status = 'open'
-RETURNING id`. If no row returned, the claim failed.
+that is currently `open`. Enforces dependency gates — raises `ValueError`
+listing specific blockers if any `depends_on` tasks are not
+`done`/`cancelled`. Also raises `ValueError` if the task is not `open`
+(already claimed, blocked, done, etc.) — the agent should call
+`get_next_task` again and try another.
 
 ```python
 async def release_task(task_id: int) -> dict
@@ -195,11 +226,12 @@ return it to the pool.
 async def list_tasks(
     assigned_to: str | None = None,
     status: str | None = None,
-    section_id: int | None = None
+    milestone_id: int | None = None,
+    tag: str | None = None
 ) -> list[dict]
 ```
 
-Returns matching tasks (summary shape). Ordered by section priority
+Returns matching tasks (summary shape). Ordered by milestone priority
 desc, sequence_order asc.
 
 ```python
@@ -214,18 +246,17 @@ Updates the given fields. `updated_at` is always refreshed. Returns the
 full task shape. Raises `ValueError` if `task_id` not found or `status`
 is invalid.
 
-Use for status transitions (`done`, `cancelled`) and reassignment.
-To claim a task, use `claim_task`. To unassign, use `release_task`.
-
 ```python
 async def create_task(
     title: str,
     description: str | None = None,
-    section_id: int | None = None,
+    milestone_id: int | None = None,
     assigned_to: str | None = None,
     sequence_order: int = 0,
-    github_issue: int | None = None,
-    relevant_docs: list[str] | None = None
+    github_issues: list[int] | None = None,
+    tags: list[str] | None = None,
+    relevant_docs: list[str] | None = None,
+    depends_on: list[int] | None = None
 ) -> dict
 ```
 
@@ -243,19 +274,19 @@ Appends a timestamped progress note to a task. Returns the note:
 {"id": 1, "task_id": 2, "author": "claude", "content": "...", "created_at": "2026-03-01T11:30:00Z"}
 ```
 
-### Section Tools
+### Milestone Tools
 
 ```python
-async def list_sections(status: str | None = None) -> list[dict]
+async def list_milestones(status: str | None = None) -> list[dict]
 ```
 
-Returns sections with task counts:
+Returns milestones with task counts:
 
 ```json
 {
   "id": 1,
-  "name": "...",
-  "description": "...",
+  "name": "Phase 3 — System Design",
+  "description": "Design docs and architecture",
   "priority": 10,
   "status": "active",
   "task_counts": {"open": 3, "in_progress": 1, "done": 5, "blocked": 0}
@@ -263,18 +294,18 @@ Returns sections with task counts:
 ```
 
 ```python
-async def create_section(
+async def create_milestone(
     name: str,
     description: str | None = None,
     priority: int = 0
 ) -> dict
 ```
 
-Creates and returns the new section (with zero task counts).
+Creates and returns the new milestone (with zero task counts).
 
 ```python
-async def update_section(
-    section_id: int,
+async def update_milestone(
+    milestone_id: int,
     name: str | None = None,
     description: str | None = None,
     priority: int | None = None,
@@ -282,8 +313,8 @@ async def update_section(
 ) -> dict
 ```
 
-Updates the given fields. Returns the updated section (with task
-counts). Raises `ValueError` if `section_id` not found or `status`
+Updates the given fields. Returns the updated milestone (with task
+counts). Raises `ValueError` if `milestone_id` not found or `status`
 is invalid.
 
 ### Clarification Tools
@@ -348,15 +379,15 @@ to see all questions needing answers.
 At the start of every agent session:
 
 ```
-1. get_current_task(assigned_to="<agent-name>")
+1. get_current_task(assigned_to="{identity}")
 2. If task returned with status "in_progress" → resume work
-3. If task returned with status "open" → claim_task(id, "<agent-name>")
-4. If None → get_next_task("<agent-name>")
-5. If task found → claim_task(id, "<agent-name>")
+3. If task returned with status "open" → claim_task(id, "{identity}")
+4. If None → get_next_task("{identity}")
+5. If task found → claim_task(id, "{identity}")
 6. If None → no work available
 ```
 
-The task description + section description + relevant_docs provide the
+The task description + milestone description + relevant_docs provide the
 context an agent needs to start work. Agents should read the files
 listed in `relevant_docs` before beginning.
 
@@ -367,5 +398,7 @@ listed in `relevant_docs` before beginning.
 
 ## MCP Transport
 
+- **Docker MCP Toolkit**: stdio via `docker mcp gateway run`. Primary
+  deployment for all agents.
 - **Local dev**: stdio. Claude Code runs the server as a subprocess.
 - **Server/Docker**: SSE at `http://host:8000/sse`.

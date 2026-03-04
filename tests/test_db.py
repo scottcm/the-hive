@@ -20,7 +20,7 @@ async def test_migrations_create_schema(db_pool):
             SELECT EXISTS (
                 SELECT 1
                 FROM information_schema.tables
-                WHERE table_schema = 'hive' AND table_name = 'sections'
+                WHERE table_schema = 'hive' AND table_name = 'milestones'
             )
             """
         )
@@ -34,11 +34,11 @@ async def test_migrations_idempotent(db_pool):
     await run_migrations(db_pool)
 
 
-async def test_insert_section(db_pool):
+async def test_insert_milestone(db_pool):
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            INSERT INTO hive.sections (name, description, priority, status)
+            INSERT INTO hive.milestones (name, description, priority, status)
             VALUES (%s, %s, %s, %s)
             RETURNING name, description, priority, status
             """,
@@ -54,71 +54,75 @@ async def test_insert_section(db_pool):
 
 async def test_insert_task(db_pool):
     async with db_pool.connection() as conn:
-        section_cursor = await conn.execute(
+        milestone_cursor = await conn.execute(
             """
-            INSERT INTO hive.sections (name, description, priority, status)
+            INSERT INTO hive.milestones (name, description, priority, status)
             VALUES (%s, %s, %s, %s)
             RETURNING id
             """,
             ("Build", "Build tasks", 5, "active"),
         )
-        section_id = (await section_cursor.fetchone())[0]
+        milestone_id = (await milestone_cursor.fetchone())[0]
 
         task_cursor = await conn.execute(
             """
             INSERT INTO hive.tasks (
-                section_id,
+                milestone_id,
                 title,
                 description,
                 status,
                 sequence_order,
                 assigned_to,
-                github_issue,
+                github_issues,
+                tags,
                 relevant_docs
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING
-                section_id,
+                milestone_id,
                 title,
                 description,
                 status,
                 sequence_order,
                 assigned_to,
-                github_issue,
+                github_issues,
+                tags,
                 relevant_docs
             """,
             (
-                section_id,
+                milestone_id,
                 "Implement connection pool",
                 "Create psycopg pool",
                 "open",
                 1,
                 "codex",
-                42,
+                [42],
+                ["orchestrator"],
                 ["docs/design/COORDINATOR.md"],
             ),
         )
         assert await task_cursor.fetchone() == (
-            section_id,
+            milestone_id,
             "Implement connection pool",
             "Create psycopg pool",
             "open",
             1,
             "codex",
-            42,
+            [42],
+            ["orchestrator"],
             ["docs/design/COORDINATOR.md"],
         )
 
 
-async def test_insert_task_no_section(db_pool):
+async def test_insert_task_no_milestone(db_pool):
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            INSERT INTO hive.tasks (section_id, title, status, sequence_order, relevant_docs)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING section_id, title, status, sequence_order, relevant_docs
+            INSERT INTO hive.tasks (milestone_id, title, status, sequence_order, relevant_docs, tags, github_issues)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING milestone_id, title, status, sequence_order, relevant_docs
             """,
-            (None, "Unassigned task", "open", 0, []),
+            (None, "Unassigned task", "open", 0, [], [], []),
         )
         assert await cursor.fetchone() == (
             None,
@@ -133,11 +137,11 @@ async def test_insert_clarification(db_pool):
     async with db_pool.connection() as conn:
         task_cursor = await conn.execute(
             """
-            INSERT INTO hive.tasks (section_id, title, status, sequence_order, relevant_docs)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO hive.tasks (milestone_id, title, status, sequence_order, relevant_docs, tags, github_issues)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (None, "Blocked task", "open", 2, []),
+            (None, "Blocked task", "open", 2, [], [], []),
         )
         task_id = (await task_cursor.fetchone())[0]
 
@@ -162,11 +166,11 @@ async def test_insert_task_note(db_pool):
     async with db_pool.connection() as conn:
         task_cursor = await conn.execute(
             """
-            INSERT INTO hive.tasks (title, status, sequence_order, relevant_docs)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO hive.tasks (title, status, sequence_order, relevant_docs, tags, github_issues)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            ("Task with note", "open", 0, []),
+            ("Task with note", "open", 0, [], [], []),
         )
         task_id = (await task_cursor.fetchone())[0]
 
@@ -202,10 +206,10 @@ async def test_task_status_constraint(db_pool):
         with pytest.raises(psycopg.errors.CheckViolation):
             await conn.execute(
                 """
-                INSERT INTO hive.tasks (section_id, title, status, sequence_order, relevant_docs)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO hive.tasks (milestone_id, title, status, sequence_order, relevant_docs, tags, github_issues)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (None, "Bad status", "invalid", 0, []),
+                (None, "Bad status", "invalid", 0, [], [], []),
             )
 
 
@@ -213,18 +217,18 @@ async def test_relevant_docs_array(db_pool):
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            INSERT INTO hive.tasks (section_id, title, status, sequence_order, relevant_docs)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO hive.tasks (milestone_id, title, status, sequence_order, relevant_docs, tags, github_issues)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING relevant_docs
             """,
-            (None, "Docs task", "open", 3, ["url1", "url2"]),
+            (None, "Docs task", "open", 3, ["url1", "url2"], [], []),
         )
         assert await cursor.fetchone() == (["url1", "url2"],)
 
 
 async def test_clean_db_fixture(db_pool):
     async with db_pool.connection() as conn:
-        cursor = await conn.execute("SELECT COUNT(*) FROM hive.sections")
+        cursor = await conn.execute("SELECT COUNT(*) FROM hive.milestones")
         assert await cursor.fetchone() == (0,)
 
 

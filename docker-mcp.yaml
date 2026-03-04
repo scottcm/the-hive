@@ -1,6 +1,6 @@
 registry:
   the-hive:
-    description: "Work coordination MCP server for AI dev teams. Provides task management, clarifications, notes, and section organization via a shared PostgreSQL-backed work queue."
+    description: "Work coordination MCP server for AI dev teams. Provides task management, clarifications, notes, and milestone organization via a shared PostgreSQL-backed work queue."
     title: "The Hive"
     type: "server"
     image: "the-hive:latest"
@@ -17,9 +17,12 @@ registry:
       - name: "update_task"
       - name: "create_task"
       - name: "add_note"
-      - name: "list_sections"
-      - name: "create_section"
-      - name: "update_section"
+      - name: "list_projects"
+      - name: "create_project"
+      - name: "update_project"
+      - name: "list_milestones"
+      - name: "create_milestone"
+      - name: "update_milestone"
       - name: "create_clarification"
       - name: "answer_clarification"
       - name: "list_clarifications"

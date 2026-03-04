@@ -5,7 +5,7 @@ from mcp.server.fastmcp import FastMCP
 
 from coordinator.db.connection import close_pool, get_pool
 from coordinator.db.migrate import run_migrations
-from coordinator.mcp.tools import clarifications, notes, sections, tasks
+from coordinator.mcp.tools import clarifications, milestones, notes, projects, tasks
 
 
 @asynccontextmanager
@@ -30,10 +30,15 @@ mcp.tool()(tasks.create_task)
 # Note tools (1)
 mcp.tool()(notes.add_note)
 
-# Section tools (3)
-mcp.tool()(sections.list_sections)
-mcp.tool()(sections.create_section)
-mcp.tool()(sections.update_section)
+# Project tools (3)
+mcp.tool()(projects.list_projects)
+mcp.tool()(projects.create_project)
+mcp.tool()(projects.update_project)
+
+# Milestone tools (3)
+mcp.tool()(milestones.list_milestones)
+mcp.tool()(milestones.create_milestone)
+mcp.tool()(milestones.update_milestone)
 
 # Clarification tools (3)
 mcp.tool()(clarifications.create_clarification)

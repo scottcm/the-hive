@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Hive — Board</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e1e4e8; }
+
+  /* Header */
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: #161b22; border-bottom: 1px solid #30363d; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; }
+  .header h1 span { color: #f0883e; }
+  .header-actions { display: flex; gap: 8px; }
+  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; font-size: 13px; cursor: pointer; }
+  .btn:hover { background: #30363d; }
+  .btn-primary { background: #238636; border-color: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+
+  /* Filter bar */
+  .filter-bar { display: flex; align-items: center; gap: 12px; padding: 10px 24px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 13px; flex-wrap: wrap; }
+  .filter-bar label { color: #8b949e; }
+  .filter-bar select { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; }
+  .stats { margin-left: auto; color: #8b949e; }
+  .stats strong { color: #f0883e; }
+
+  /* Board */
+  .board { padding: 20px 24px; }
+
+  /* Milestone */
+  .milestone { margin-bottom: 24px; }
+  .milestone-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #21262d; cursor: pointer; user-select: none; }
+  .milestone-header:hover { border-bottom-color: #388bfd; }
+  .milestone-toggle { font-size: 12px; color: #8b949e; transition: transform 0.15s; }
+  .milestone-toggle.collapsed { transform: rotate(-90deg); }
+  .milestone-name { font-size: 15px; font-weight: 600; color: #f0f6fc; }
+  .milestone-desc { font-size: 12px; color: #8b949e; }
+  .milestone-counts { margin-left: auto; font-size: 12px; color: #8b949e; display: flex; gap: 10px; }
+
+  /* Task cards */
+  .task-list { display: flex; flex-direction: column; gap: 4px; }
+  .task-list.collapsed { display: none; }
+  .task-card { display: grid; grid-template-columns: 32px 1fr 120px 100px 80px 80px; align-items: center; gap: 12px; padding: 10px 14px; background: #161b22; border: 1px solid #21262d; border-radius: 6px; cursor: pointer; transition: border-color 0.15s; text-decoration: none; color: inherit; }
+  .task-card:hover { border-color: #388bfd; }
+  .task-id { font-size: 12px; color: #8b949e; font-family: monospace; }
+  .task-title { font-size: 14px; color: #e1e4e8; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .task-title .gh-link { color: #388bfd; font-size: 12px; text-decoration: none; }
+  .task-title .gh-link:hover { text-decoration: underline; }
+
+  /* Tags */
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #1a2d4a; color: #58a6ff; font-weight: 500; }
+  .tag.orchestrator { background: #2a1d0e; color: #f0883e; }
+  .tag.memory { background: #1a2d4a; color: #58a6ff; }
+  .tag.salience { background: #1a1a2e; color: #a371f7; }
+  .tag.dashboard { background: #1a3a2a; color: #3fb950; }
+  .tag.mcp { background: #2a2a1a; color: #d2a8ff; }
+
+  /* Status badges */
+  .status { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 12px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+  .status-open { background: #1a3a2a; color: #3fb950; }
+  .status-in_progress { background: #1a2d4a; color: #58a6ff; }
+  .status-blocked { background: #3d1a1a; color: #f85149; }
+  .status-done { background: #1a1a2e; color: #8b949e; }
+  .status-cancelled { background: #1a1a1a; color: #6e7681; }
+
+  /* Assignee */
+  .assignee { font-size: 12px; color: #c9d1d9; display: flex; align-items: center; gap: 4px; }
+  .assignee-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .assignee-dot.claude { background: #a371f7; }
+  .assignee-dot.codex { background: #3fb950; }
+  .assignee-dot.gemini { background: #388bfd; }
+  .assignee-dot.scott { background: #f0883e; }
+  .unassigned { color: #6e7681; font-style: italic; }
+
+  /* Blocked indicator */
+  .blocked-badge { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: #f85149; }
+  .blocked-badge::before { content: "!"; background: #f85149; color: #0f1117; width: 14px; height: 14px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; }
+
+  /* Clarification banner */
+  .clarification-banner { display: flex; align-items: center; gap: 8px; margin: 0 24px 16px; padding: 10px 14px; background: #2a1515; border: 1px solid #4a2020; border-radius: 6px; font-size: 13px; color: #f85149; }
+  .clarification-banner strong { color: #f0f6fc; }
+  .clarification-banner .btn { margin-left: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>&#x2B22;</span> The Hive</h1>
+  <div class="header-actions">
+    <button class="btn">+ Milestone</button>
+    <button class="btn btn-primary">+ Task</button>
+  </div>
+</div>
+
+<div class="clarification-banner">
+  <strong>3 pending clarifications</strong> — agents are blocked and waiting for answers
+  <button class="btn">Review</button>
+</div>
+
+<div class="filter-bar">
+  <label>Status:</label>
+  <select>
+    <option>All</option>
+    <option>Open</option>
+    <option>In Progress</option>
+    <option>Blocked</option>
+    <option>Done</option>
+  </select>
+  <label>Assignee:</label>
+  <select>
+    <option>All</option>
+    <option>claude</option>
+    <option>codex</option>
+    <option>gemini</option>
+    <option>scott</option>
+    <option>Unassigned</option>
+  </select>
+  <label>Tag:</label>
+  <select>
+    <option>All</option>
+    <option>orchestrator</option>
+    <option>memory</option>
+    <option>salience</option>
+    <option>dashboard</option>
+    <option>mcp</option>
+  </select>
+  <div class="stats">
+    <strong>12</strong> tasks &middot; 3 in progress &middot; 2 blocked &middot; 4 open
+  </div>
+</div>
+
+<div class="board">
+
+  <!-- Milestone 1: Active, expanded -->
+  <div class="milestone">
+    <div class="milestone-header" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.milestone-toggle').classList.toggle('collapsed')">
+      <span class="milestone-toggle">&#x25BC;</span>
+      <span class="milestone-name">Phase 3 — System Design</span>
+      <span class="milestone-desc">Design docs, decision docs, architecture</span>
+      <div class="milestone-counts">
+        <span>2 open</span> <span>2 in progress</span> <span>2 blocked</span>
+      </div>
+    </div>
+    <div class="task-list">
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#1</span>
+        <span class="task-title">Implement pipeline stage routing
+          <span class="tag orchestrator">orchestrator</span>
+          <span class="gh-link">#142 &#x2197;</span>
+        </span>
+        <span class="status status-in_progress">In Progress</span>
+        <span class="assignee"><span class="assignee-dot claude"></span> claude</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#2</span>
+        <span class="task-title">Wire salience scoring into stage 4
+          <span class="tag orchestrator">orchestrator</span>
+          <span class="tag salience">salience</span>
+          <span class="gh-link">#143 &#x2197;</span>
+        </span>
+        <span class="status status-blocked">Blocked</span>
+        <span class="assignee"><span class="assignee-dot codex"></span> codex</span>
+        <span class="blocked-badge">1 question</span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#3</span>
+        <span class="task-title">Add executive coordinator hook points
+          <span class="tag orchestrator">orchestrator</span>
+        </span>
+        <span class="status status-open">Open</span>
+        <span class="assignee unassigned">unassigned</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#4</span>
+        <span class="task-title">Pipeline integration tests
+          <span class="tag orchestrator">orchestrator</span>
+          <span class="gh-link">#145 &#x2197;</span>
+        </span>
+        <span class="status status-open">Open</span>
+        <span class="assignee"><span class="assignee-dot gemini"></span> gemini</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#5</span>
+        <span class="task-title">MemoryStore protocol and DerivedFactStore
+          <span class="tag memory">memory</span>
+          <span class="gh-link">#150 &#x2197;</span>
+        </span>
+        <span class="status status-in_progress">In Progress</span>
+        <span class="assignee"><span class="assignee-dot codex"></span> codex</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#6</span>
+        <span class="task-title">ConsolidationScheduler idle-trigger
+          <span class="tag memory">memory</span>
+        </span>
+        <span class="status status-blocked">Blocked</span>
+        <span class="assignee"><span class="assignee-dot claude"></span> claude</span>
+        <span class="blocked-badge">2 questions</span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#7</span>
+        <span class="task-title">Embedding model integration
+          <span class="tag memory">memory</span>
+        </span>
+        <span class="status status-open">Open</span>
+        <span class="assignee unassigned">unassigned</span>
+        <span></span>
+        <span></span>
+      </a>
+    </div>
+  </div>
+
+  <!-- Milestone 2: Active, expanded -->
+  <div class="milestone">
+    <div class="milestone-header" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.milestone-toggle').classList.toggle('collapsed')">
+      <span class="milestone-toggle">&#x25BC;</span>
+      <span class="milestone-name">Hive Dashboard</span>
+      <span class="milestone-desc">Web UI for the-hive coordination tool</span>
+      <div class="milestone-counts">
+        <span>1 open</span> <span>1 in progress</span>
+      </div>
+    </div>
+    <div class="task-list">
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#8</span>
+        <span class="task-title">FastAPI web layer + Svelte scaffold
+          <span class="tag dashboard">dashboard</span>
+        </span>
+        <span class="status status-in_progress">In Progress</span>
+        <span class="assignee"><span class="assignee-dot gemini"></span> gemini</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html">
+        <span class="task-id">#9</span>
+        <span class="task-title">Board view component
+          <span class="tag dashboard">dashboard</span>
+        </span>
+        <span class="status status-open">Open</span>
+        <span class="assignee unassigned">unassigned</span>
+        <span></span>
+        <span></span>
+      </a>
+    </div>
+  </div>
+
+  <!-- Milestone 3: Completed, collapsed by default -->
+  <div class="milestone">
+    <div class="milestone-header" style="opacity: 0.5;" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.milestone-toggle').classList.toggle('collapsed')">
+      <span class="milestone-toggle collapsed">&#x25BC;</span>
+      <span class="milestone-name">MCP Infrastructure</span>
+      <span class="milestone-desc">Docker MCP Toolkit setup and agent integration</span>
+      <div class="milestone-counts">
+        <span style="color: #3fb950;">3 done</span>
+      </div>
+    </div>
+    <div class="task-list collapsed">
+      <a class="task-card" href="task-detail.html" style="opacity: 0.5;">
+        <span class="task-id">#10</span>
+        <span class="task-title">Containerize hive for Docker MCP Toolkit
+          <span class="tag mcp">mcp</span>
+        </span>
+        <span class="status status-done">Done</span>
+        <span class="assignee"><span class="assignee-dot claude"></span> claude</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html" style="opacity: 0.5;">
+        <span class="task-id">#11</span>
+        <span class="task-title">Configure agent MCP connections
+          <span class="tag mcp">mcp</span>
+        </span>
+        <span class="status status-done">Done</span>
+        <span class="assignee"><span class="assignee-dot claude"></span> claude</span>
+        <span></span>
+        <span></span>
+      </a>
+      <a class="task-card" href="task-detail.html" style="opacity: 0.5;">
+        <span class="task-id">#12</span>
+        <span class="task-title">Test end-to-end agent workflow
+          <span class="tag mcp">mcp</span>
+        </span>
+        <span class="status status-done">Done</span>
+        <span class="assignee"><span class="assignee-dot codex"></span> codex</span>
+        <span></span>
+        <span></span>
+      </a>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

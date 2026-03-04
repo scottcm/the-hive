@@ -30,7 +30,7 @@ async def _reset_db(db_pool) -> None:
     async with db_pool.connection() as conn:
         await conn.execute(
             """
-            TRUNCATE hive.clarifications, hive.task_notes, hive.tasks, hive.sections
+            TRUNCATE hive.clarifications, hive.task_notes, hive.tasks, hive.milestones, hive.projects
             RESTART IDENTITY CASCADE
             """
         )

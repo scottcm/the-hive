@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Hive — Task #2</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e1e4e8; }
+
+  /* Header */
+  .header { display: flex; align-items: center; gap: 12px; padding: 12px 24px; background: #161b22; border-bottom: 1px solid #30363d; }
+  .header a { color: #388bfd; text-decoration: none; font-size: 14px; }
+  .header a:hover { text-decoration: underline; }
+  .header h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; flex: 1; }
+  .header .task-num { color: #8b949e; font-weight: 400; }
+  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; font-size: 13px; cursor: pointer; }
+  .btn:hover { background: #30363d; }
+  .btn-danger { border-color: #f85149; color: #f85149; }
+  .btn-danger:hover { background: #3d1a1a; }
+  .btn-primary { background: #238636; border-color: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-sm { padding: 3px 8px; font-size: 11px; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 1fr 320px; min-height: calc(100vh - 53px); }
+
+  /* Main content */
+  .main { padding: 0; overflow-y: auto; }
+
+  /* Tabs */
+  .tabs { display: flex; border-bottom: 1px solid #30363d; background: #161b22; }
+  .tab { padding: 10px 20px; font-size: 14px; color: #8b949e; cursor: pointer; border-bottom: 2px solid transparent; transition: color 0.15s; }
+  .tab:hover { color: #e1e4e8; }
+  .tab.active { color: #f0f6fc; border-bottom-color: #f0883e; }
+  .tab-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 6px; border-radius: 9px; font-size: 11px; font-weight: 600; }
+  .tab-badge.alert { background: #3d1a1a; color: #f85149; }
+  .tab-badge.neutral { background: #21262d; color: #8b949e; }
+
+  .tab-content { padding: 24px; display: none; }
+  .tab-content.active { display: block; }
+
+  /* Sidebar */
+  .sidebar { padding: 20px; background: #161b22; border-left: 1px solid #30363d; }
+  .sidebar-section { margin-bottom: 20px; }
+  .sidebar-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; margin-bottom: 6px; }
+  .sidebar-value { font-size: 14px; color: #e1e4e8; }
+
+  /* Status dropdown */
+  .status-select { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; width: 100%; }
+  .assignee-select { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; width: 100%; }
+
+  /* Tags */
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 3px; font-weight: 500; display: inline-block; margin-right: 4px; margin-bottom: 4px; }
+  .tag.orchestrator { background: #2a1d0e; color: #f0883e; }
+  .tag.salience { background: #1a1a2e; color: #a371f7; }
+  .tag.memory { background: #1a2d4a; color: #58a6ff; }
+
+  /* === Context tab === */
+
+  /* Description */
+  .description { margin-bottom: 28px; }
+  .description h2 { font-size: 14px; color: #8b949e; margin-bottom: 8px; font-weight: 600; }
+  .description p { font-size: 14px; line-height: 1.6; color: #c9d1d9; }
+
+  /* Relevant docs */
+  .docs-list { margin-bottom: 28px; }
+  .docs-list h2 { font-size: 14px; color: #8b949e; margin-bottom: 8px; font-weight: 600; }
+  .doc-link { display: block; padding: 6px 10px; margin-bottom: 4px; background: #21262d; border-radius: 4px; color: #388bfd; font-size: 13px; font-family: monospace; text-decoration: none; }
+  .doc-link:hover { background: #30363d; }
+
+  /* GitHub section */
+  .github-section { margin-bottom: 28px; padding: 14px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+  .github-section h2 { font-size: 14px; color: #8b949e; margin-bottom: 10px; font-weight: 600; }
+  .gh-issues-header { font-size: 12px; font-weight: 600; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .gh-issue { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .gh-issue-icon { width: 16px; height: 16px; border-radius: 50%; background: #3fb950; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; flex-shrink: 0; }
+  .gh-issue-icon.closed { background: #a371f7; }
+  .gh-issue a { color: #388bfd; text-decoration: none; font-size: 14px; }
+  .gh-issue a:hover { text-decoration: underline; }
+  .gh-issue .issue-state { font-size: 11px; padding: 2px 6px; border-radius: 8px; }
+  .gh-issue .issue-state.open { background: #1a3a2a; color: #3fb950; }
+  .gh-issue .issue-state.closed { background: #1a1a2e; color: #a371f7; }
+  .gh-issue .btn-close-issue { margin-left: auto; }
+  .gh-divider { border: none; border-top: 1px solid #21262d; margin: 10px 0; }
+  .gh-pr { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .gh-pr-icon { color: #3fb950; font-size: 14px; }
+  .gh-pr a { color: #388bfd; text-decoration: none; font-size: 13px; }
+  .gh-pr a:hover { text-decoration: underline; }
+  .gh-ci { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; margin-top: 6px; }
+  .gh-ci-pass { color: #3fb950; }
+  .gh-ci-fail { color: #f85149; }
+
+  /* === Activity tab === */
+
+  /* Clarifications */
+  .clarifications { margin-bottom: 28px; }
+  .clarifications h2 { font-size: 14px; color: #f85149; margin-bottom: 10px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .clarification-card { padding: 12px 14px; margin-bottom: 8px; background: #1a1215; border: 1px solid #4a2020; border-radius: 8px; }
+  .clarification-meta { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
+  .clarification-question { font-size: 14px; color: #e1e4e8; margin-bottom: 10px; line-height: 1.5; }
+  .clarification-answer { width: 100%; background: #21262d; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical; min-height: 60px; }
+  .clarification-answer:focus { outline: none; border-color: #388bfd; }
+  .clarification-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .clarification-answered { padding: 12px 14px; margin-bottom: 8px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
+  .clarification-answered .answer-text { font-size: 13px; color: #8b949e; margin-top: 6px; padding-left: 12px; border-left: 2px solid #30363d; }
+
+  /* Notes timeline */
+  .notes { margin-bottom: 28px; }
+  .notes h2 { font-size: 14px; color: #8b949e; margin-bottom: 10px; font-weight: 600; }
+  .note { padding: 10px 14px; margin-bottom: 6px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
+  .note-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .note-author { font-size: 12px; font-weight: 600; color: #c9d1d9; }
+  .note-time { font-size: 11px; color: #6e7681; }
+  .note-content { font-size: 13px; color: #c9d1d9; line-height: 1.5; }
+  .note-input-area { display: flex; gap: 8px; margin-top: 10px; }
+  .note-input { flex: 1; background: #21262d; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; padding: 8px 10px; font-size: 13px; font-family: inherit; }
+  .note-input:focus { outline: none; border-color: #388bfd; }
+
+  /* Assignee dots */
+  .assignee-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .assignee-dot.codex { background: #3fb950; }
+  .assignee-dot.claude { background: #a371f7; }
+  .assignee-dot.scott { background: #f0883e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="board.html">&larr; Board</a>
+  <h1>Wire salience scoring into stage 4 <span class="task-num">#2</span></h1>
+  <button class="btn">Edit</button>
+  <button class="btn btn-danger">Release</button>
+</div>
+
+<div class="layout">
+  <div class="main">
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('context')">Context</div>
+      <div class="tab" onclick="switchTab('activity')">Activity
+        <span class="tab-badge alert">1</span>
+      </div>
+    </div>
+
+    <!-- Context Tab -->
+    <div class="tab-content active" id="tab-context">
+
+      <!-- Description -->
+      <div class="description">
+        <h2>Description</h2>
+        <p>
+          Integrate the salience service scoring into pipeline stage 4 (hot-path heuristic matching).
+          The salience score needs to be available before the executive coordinator evaluates the event.
+          Must handle the case where the salience service is unavailable (fail-open with default score of 0.5).
+        </p>
+      </div>
+
+      <!-- Relevant docs -->
+      <div class="docs-list">
+        <h2>Relevant Docs</h2>
+        <a class="doc-link" href="#">docs/design/ORCHESTRATOR_EVENT_PIPELINE.md</a>
+        <a class="doc-link" href="#">docs/design/salience/SALIENCE_MODEL.md</a>
+      </div>
+
+      <!-- GitHub -->
+      <div class="github-section">
+        <h2>GitHub</h2>
+
+        <div class="gh-issues-header">Issues</div>
+        <div class="gh-issue">
+          <span class="gh-issue-icon">&#x25cf;</span>
+          <a href="https://github.com/scottcm/GLADys/issues/143">#143 — Salience scoring in pipeline stage 4</a>
+          <span class="issue-state open">open</span>
+          <button class="btn btn-sm btn-danger gh-close-issue">Close</button>
+        </div>
+        <div class="gh-issue">
+          <span class="gh-issue-icon">&#x25cf;</span>
+          <a href="https://github.com/scottcm/GLADys/issues/147">#147 — Default score fallback when salience unavailable</a>
+          <span class="issue-state open">open</span>
+          <button class="btn btn-sm btn-danger gh-close-issue">Close</button>
+        </div>
+
+        <hr class="gh-divider">
+
+        <div class="gh-pr">
+          <span class="gh-pr-icon">&#x2442;</span>
+          <a href="#">PR #156 — feat(pipeline): wire salience scoring</a>
+        </div>
+        <div class="gh-ci">
+          <span class="gh-ci-fail">&#x2717;</span> CI failed — <a href="#" style="color: #388bfd; text-decoration: none;">test_pipeline_scoring</a> (3m ago)
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Activity Tab -->
+    <div class="tab-content" id="tab-activity">
+
+      <!-- Clarifications -->
+      <div class="clarifications">
+        <h2>&#x26A0; Pending Clarification</h2>
+
+        <div class="clarification-card">
+          <div class="clarification-meta">
+            <span class="assignee-dot codex"></span>
+            <strong>codex</strong> asked 2 hours ago
+          </div>
+          <div class="clarification-question">
+            Should the salience score be computed synchronously in the pipeline stage, or can we fire-and-forget
+            and attach the score asynchronously before stage 6?
+          </div>
+          <textarea class="clarification-answer" placeholder="Type your answer..."></textarea>
+          <div class="clarification-actions">
+            <button class="btn btn-primary">Answer</button>
+          </div>
+        </div>
+
+        <!-- Answered clarification -->
+        <div class="clarification-answered">
+          <div class="clarification-meta">
+            <span class="assignee-dot codex"></span>
+            <strong>codex</strong> asked yesterday &middot; <span style="color: #3fb950;">answered</span>
+          </div>
+          <div class="clarification-question">
+            The salience service returns a vector of dimension scores. Should we pass the full vector to the
+            executive, or just the aggregate score?
+          </div>
+          <div class="answer-text">
+            Pass the full vector. The executive needs individual dimension scores (urgency, surprise, relevance)
+            for its decision strategy. The aggregate score is only for priority ordering.
+          </div>
+        </div>
+      </div>
+
+      <!-- Notes timeline -->
+      <div class="notes">
+        <h2>Notes</h2>
+
+        <div class="note">
+          <div class="note-header">
+            <span class="assignee-dot codex"></span>
+            <span class="note-author">codex</span>
+            <span class="note-time">2 hours ago</span>
+          </div>
+          <div class="note-content">
+            Scaffolded SalienceScorer class in pipeline/stages.py. Blocked on clarification about sync vs async scoring.
+            PR #156 is up with the scaffolding, CI is failing on the actual scoring test (expected — test written RED).
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="note-header">
+            <span class="assignee-dot codex"></span>
+            <span class="note-author">codex</span>
+            <span class="note-time">5 hours ago</span>
+          </div>
+          <div class="note-content">
+            Claimed task. Reading ORCHESTRATOR_EVENT_PIPELINE.md and SALIENCE_MODEL.md to understand the integration points.
+            Stage 4 currently has a placeholder — need to wire in the actual gRPC call to the salience service.
+          </div>
+        </div>
+
+        <div class="note">
+          <div class="note-header">
+            <span class="assignee-dot scott"></span>
+            <span class="note-author">scott</span>
+            <span class="note-time">yesterday</span>
+          </div>
+          <div class="note-content">
+            Created task. This depends on the salience service being accessible from the orchestrator process.
+            See D2 decision in subsystem-rewrite.md for the embedding model location decision.
+          </div>
+        </div>
+
+        <div class="note-input-area">
+          <input class="note-input" placeholder="Add a note..." />
+          <button class="btn btn-primary">Post</button>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Status</div>
+      <select class="status-select">
+        <option>open</option>
+        <option>in_progress</option>
+        <option selected>blocked</option>
+        <option>done</option>
+        <option>cancelled</option>
+      </select>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Assigned To</div>
+      <select class="assignee-select">
+        <option>unassigned</option>
+        <option>claude</option>
+        <option selected>codex</option>
+        <option>gemini</option>
+        <option>scott</option>
+      </select>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Milestone</div>
+      <div class="sidebar-value">Phase 3 — System Design</div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Tags</div>
+      <div>
+        <span class="tag orchestrator">orchestrator</span>
+        <span class="tag salience">salience</span>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Sequence Order</div>
+      <div class="sidebar-value">2</div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">GitHub Issues</div>
+      <div class="sidebar-value" style="font-size: 13px;">
+        <a href="https://github.com/scottcm/GLADys/issues/143" style="color: #388bfd; text-decoration: none;">#143</a>,
+        <a href="https://github.com/scottcm/GLADys/issues/147" style="color: #388bfd; text-decoration: none;">#147</a>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Created</div>
+      <div class="sidebar-value" style="font-size: 12px; color: #8b949e;">Mar 4, 2026 10:30 AM</div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Updated</div>
+      <div class="sidebar-value" style="font-size: 12px; color: #8b949e;">Mar 4, 2026 3:15 PM</div>
+    </div>
+  </div>
+</div>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  // highlight the clicked tab
+  const tabs = document.querySelectorAll('.tab');
+  if (name === 'context') tabs[0].classList.add('active');
+  else tabs[1].classList.add('active');
+}
+</script>
+
+</body>
+</html>

@@ -12,11 +12,11 @@ async def insert_task(
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            INSERT INTO hive.tasks (section_id, title, status, sequence_order, relevant_docs)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO hive.tasks (milestone_id, title, status, sequence_order, relevant_docs, tags, github_issues)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (None, title, status, 0, []),
+            (None, title, status, 0, [], [], []),
         )
         return (await cursor.fetchone())[0]
 
