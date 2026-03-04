@@ -1,0 +1,61 @@
+import pytest
+
+from coordinator.mcp.tools import notes, tasks
+
+
+async def insert_task(
+    db_pool,
+    *,
+    title: str,
+    status: str = "open",
+    assigned_to: str | None = None,
+) -> int:
+    async with db_pool.connection() as conn:
+        cursor = await conn.execute(
+            """
+            INSERT INTO hive.tasks (title, status, sequence_order, assigned_to, relevant_docs)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (title, status, 0, assigned_to, []),
+        )
+        return (await cursor.fetchone())[0]
+
+
+async def test_add_note(db_pool):
+    task_id = await insert_task(db_pool, title="Task with note")
+
+    note = await notes.add_note(task_id=task_id, author="codex", content="Started work")
+
+    assert note["id"] > 0
+    assert note["task_id"] == task_id
+    assert note["author"] == "codex"
+    assert note["content"] == "Started work"
+    assert isinstance(note["created_at"], str)
+
+
+async def test_add_note_task_not_found(db_pool):
+    with pytest.raises(ValueError, match="Task 9999 not found"):
+        await notes.add_note(task_id=9999, author="codex", content="Missing task")
+
+
+async def test_add_note_appears_in_get_current_task(db_pool):
+    task_id = await insert_task(
+        db_pool,
+        title="Current task",
+        status="in_progress",
+        assigned_to="codex",
+    )
+
+    note = await notes.add_note(task_id=task_id, author="codex", content="Investigating")
+    task = await tasks.get_current_task("codex")
+
+    assert task is not None
+    assert task["notes"] == [
+        {
+            "id": note["id"],
+            "author": "codex",
+            "content": "Investigating",
+            "created_at": note["created_at"],
+        }
+    ]

@@ -1,3 +1,5 @@
+import pytest
+
 from coordinator.mcp.tools import sections
 
 
@@ -8,16 +10,15 @@ async def insert_section(
     description: str | None = None,
     priority: int = 0,
     status: str = "active",
-    assigned_to: str | None = None,
 ) -> int:
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            INSERT INTO hive.sections (name, description, priority, status, assigned_to)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO hive.sections (name, description, priority, status)
+            VALUES (%s, %s, %s, %s)
             RETURNING id
             """,
-            (name, description, priority, status, assigned_to),
+            (name, description, priority, status),
         )
         return (await cursor.fetchone())[0]
 
@@ -32,11 +33,11 @@ async def insert_task(
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            INSERT INTO hive.tasks (section_id, title, status, priority, sequence_order, relevant_docs)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO hive.tasks (section_id, title, status, sequence_order, relevant_docs)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (section_id, title, status, 0, 0, []),
+            (section_id, title, status, 0, []),
         )
         return (await cursor.fetchone())[0]
 
@@ -45,7 +46,7 @@ async def fetch_section_row(db_pool, section_id: int) -> tuple:
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
             """
-            SELECT name, description, priority, status, assigned_to
+            SELECT name, description, priority, status
             FROM hive.sections
             WHERE id = %s
             """,
@@ -56,7 +57,7 @@ async def fetch_section_row(db_pool, section_id: int) -> tuple:
         return row
 
 
-async def test_list_sections_empty():
+async def test_list_sections_empty(db_pool):
     assert await sections.list_sections() == []
 
 
@@ -87,7 +88,6 @@ async def test_list_sections_with_counts(db_pool):
             "description": None,
             "priority": 4,
             "status": "active",
-            "assigned_to": None,
             "task_counts": {
                 "open": 1,
                 "in_progress": 1,
@@ -108,6 +108,16 @@ async def test_list_sections_filter_by_status(db_pool):
     assert result[0]["status"] == "active"
 
 
+async def test_list_sections_ordered_by_priority(db_pool):
+    low_id = await insert_section(db_pool, name="Low", priority=1)
+    high_id = await insert_section(db_pool, name="High", priority=9)
+    mid_id = await insert_section(db_pool, name="Mid", priority=4)
+
+    result = await sections.list_sections()
+
+    assert [section["id"] for section in result] == [high_id, mid_id, low_id]
+
+
 async def test_create_section_minimal(db_pool):
     section = await sections.create_section("Planning")
     row = await fetch_section_row(db_pool, section["id"])
@@ -118,10 +128,9 @@ async def test_create_section_minimal(db_pool):
         "description": None,
         "priority": 0,
         "status": "active",
-        "assigned_to": None,
         "task_counts": {"open": 0, "in_progress": 0, "done": 0, "blocked": 0},
     }
-    assert row == ("Planning", None, 0, "active", None)
+    assert row == ("Planning", None, 0, "active")
 
 
 async def test_create_section_full(db_pool):
@@ -129,7 +138,6 @@ async def test_create_section_full(db_pool):
         "Execution",
         description="Implementation work",
         priority=8,
-        assigned_to="codex",
     )
     row = await fetch_section_row(db_pool, section["id"])
 
@@ -139,17 +147,30 @@ async def test_create_section_full(db_pool):
         "description": "Implementation work",
         "priority": 8,
         "status": "active",
-        "assigned_to": "codex",
         "task_counts": {"open": 0, "in_progress": 0, "done": 0, "blocked": 0},
     }
-    assert row == ("Execution", "Implementation work", 8, "active", "codex")
+    assert row == ("Execution", "Implementation work", 8, "active")
 
 
-async def test_list_sections_ordered_by_priority(db_pool):
-    low_id = await insert_section(db_pool, name="Low", priority=1)
-    high_id = await insert_section(db_pool, name="High", priority=9)
-    mid_id = await insert_section(db_pool, name="Mid", priority=4)
+async def test_update_section_fields(db_pool):
+    section_id = await insert_section(db_pool, name="Old", description="Before", priority=1)
 
-    result = await sections.list_sections()
+    section = await sections.update_section(
+        section_id,
+        name="New",
+        priority=7,
+        status="done",
+    )
+    row = await fetch_section_row(db_pool, section_id)
 
-    assert [section["id"] for section in result] == [high_id, mid_id, low_id]
+    assert section["id"] == section_id
+    assert section["name"] == "New"
+    assert section["description"] == "Before"
+    assert section["priority"] == 7
+    assert section["status"] == "done"
+    assert row == ("New", "Before", 7, "done")
+
+
+async def test_update_section_not_found(db_pool):
+    with pytest.raises(ValueError, match="Section 9999 not found"):
+        await sections.update_section(9999, name="Nope")
