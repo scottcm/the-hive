@@ -1,10 +1,22 @@
 import os
+from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
+from coordinator.db.connection import close_pool, get_pool
+from coordinator.db.migrate import run_migrations
 from coordinator.mcp.tools import clarifications, notes, sections, tasks
 
-mcp = FastMCP("hive")
+
+@asynccontextmanager
+async def lifespan(server):
+    pool = await get_pool()
+    await run_migrations(pool)
+    yield
+    await close_pool()
+
+
+mcp = FastMCP("hive", lifespan=lifespan)
 
 # Task tools (7)
 mcp.tool()(tasks.get_current_task)
@@ -30,7 +42,4 @@ mcp.tool()(clarifications.list_clarifications)
 
 if __name__ == "__main__":
     transport = os.getenv("HIVE_TRANSPORT", "stdio")
-    if transport == "sse":
-        mcp.run(transport="sse")
-    else:
-        mcp.run(transport="stdio")
+    mcp.run(transport=transport)

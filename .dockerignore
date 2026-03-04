@@ -1,0 +1,10 @@
+tests/
+prompts/
+reviews/
+docs/
+*.egg-info/
+__pycache__/
+.env
+.env.example
+uv.lock
+pytest-cache-files-*/

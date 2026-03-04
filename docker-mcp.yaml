@@ -1,0 +1,25 @@
+registry:
+  the-hive:
+    description: "Work coordination MCP server for AI dev teams. Provides task management, clarifications, notes, and section organization via a shared PostgreSQL-backed work queue."
+    title: "The Hive"
+    type: "server"
+    image: "the-hive:latest"
+    secrets:
+      - name: "the-hive.db_url"
+        env: "HIVE_DB_URL"
+        example: "postgresql://postgres@host.docker.internal:5432/hive"
+    tools:
+      - name: "get_current_task"
+      - name: "get_next_task"
+      - name: "claim_task"
+      - name: "release_task"
+      - name: "list_tasks"
+      - name: "update_task"
+      - name: "create_task"
+      - name: "add_note"
+      - name: "list_sections"
+      - name: "create_section"
+      - name: "update_section"
+      - name: "create_clarification"
+      - name: "answer_clarification"
+      - name: "list_clarifications"
