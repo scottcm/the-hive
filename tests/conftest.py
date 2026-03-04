@@ -2,9 +2,12 @@ import asyncio
 import os
 
 import pytest
+from dotenv import load_dotenv
 
 if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+load_dotenv()
 
 test_db_url = os.environ.get("HIVE_TEST_DB_URL")
 if test_db_url:
@@ -23,6 +26,16 @@ async def db_pool():
     await close_pool()
 
 
+async def _reset_db(db_pool) -> None:
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            TRUNCATE hive.clarifications, hive.task_notes, hive.tasks, hive.sections
+            RESTART IDENTITY CASCADE
+            """
+        )
+
+
 @pytest.fixture(autouse=True)
 async def clean_db(request):
     if request.node.name == "test_missing_hive_db_url_raises":
@@ -30,8 +43,6 @@ async def clean_db(request):
         return
 
     db_pool = request.getfixturevalue("db_pool")
+    await _reset_db(db_pool)
     yield
-    async with db_pool.connection() as conn:
-        await conn.execute("DELETE FROM hive.clarifications")
-        await conn.execute("DELETE FROM hive.tasks")
-        await conn.execute("DELETE FROM hive.sections")
+    await _reset_db(db_pool)
