@@ -222,3 +222,8 @@ async def test_update_milestone_fields(db_pool):
 async def test_update_milestone_not_found(db_pool):
     with pytest.raises(ValueError, match="Milestone 9999 not found"):
         await milestones.update_milestone(9999, name="Nope")
+
+
+async def test_create_milestone_invalid_project_id(db_pool):
+    with pytest.raises(ValueError, match="Project 9999 not found"):
+        await milestones.create_milestone("Bad project", project_id=9999)

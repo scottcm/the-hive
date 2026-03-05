@@ -1,5 +1,6 @@
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 
 from coordinator.db.connection import get_pool
@@ -108,14 +109,19 @@ async def create_milestone(
     async with pool.connection() as conn:
         async with conn.transaction():
             cursor = conn.cursor(row_factory=dict_row)
-            await cursor.execute(
-                """
-                INSERT INTO hive.milestones (name, description, priority, project_id)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id
-                """,
-                (name, description, priority, project_id),
-            )
+            try:
+                await cursor.execute(
+                    """
+                    INSERT INTO hive.milestones (name, description, priority, project_id)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (name, description, priority, project_id),
+                )
+            except psycopg.errors.ForeignKeyViolation as exc:
+                raise ValueError(
+                    f"Project {project_id} not found"
+                ) from exc
             row = await cursor.fetchone()
             assert row is not None
             return await _fetch_milestone(row["id"], conn)

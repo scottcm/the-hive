@@ -7,9 +7,27 @@ through the MCP tools.
 ## Prerequisites
 
 - Docker image rebuilt with latest code (`docker build -t the-hive-mcp .`)
-- Hive DB seeded with dashboard tasks (`python scripts/seed_dashboard_tasks.py`)
+- Hive DB seeded with dashboard tasks
+  (`python scripts/seed_dashboard_tasks.py`)
 - MCP server accessible to at least one agent session
 - Agent bootstrap prompt (`prompts/agent-bootstrap.md`) loaded
+
+## Task ID Reference
+
+After a clean reset + re-seed, the seed script prints the actual IDs.
+On a fresh database they will be:
+
+| ID | Title | Milestone | Depends on |
+|----|-------|-----------|------------|
+| 1 | FastAPI scaffold + project/milestone API | API Backend | none |
+| 2 | Task API endpoints | API Backend | 1 |
+| 3 | Clarification API endpoints | API Backend | 1 |
+| 4 | Svelte scaffold + board view | Dashboard Frontend | 1, 2 |
+| 5 | Task detail view | Dashboard Frontend | 2, 3 |
+| 6 | GitHub integration | Dashboard Frontend | 5 |
+
+If your database has pre-existing data, substitute the actual IDs
+printed by the seed script. The test steps below use these IDs.
 
 ## Test Sequence
 
@@ -26,11 +44,11 @@ that later tests depend on.
 2. Agent calls `get_current_task(assigned_to="test-1")`
 3. Expect: `None` (no tasks assigned to this identity)
 4. Agent calls `get_next_task(assigned_to="test-1")`
-5. Expect: returns task 4 ("FastAPI scaffold + project/milestone API")
-   — the only task with no unmet dependencies
+5. Expect: returns task 1 ("FastAPI scaffold + project/milestone
+   API") — the only task with no unmet dependencies
 
 **Validates**: Bootstrap flow works. Dependency filtering excludes
-tasks 5-9 (all have unmet deps).
+tasks 2-6 (all have unmet deps).
 
 ### T2: Dependency gate — blocked claim
 
@@ -38,11 +56,11 @@ tasks 5-9 (all have unmet deps).
 
 **Steps**:
 
-1. Agent calls `claim_task(task_id=5, assigned_to="test-1")`
-2. Expect: `ValueError` with message containing "unmet dependencies"
-   and "#4 (open)"
-3. Agent calls `claim_task(task_id=7, assigned_to="test-1")`
-4. Expect: `ValueError` listing both #4 and #5 as blockers
+1. Agent calls `claim_task(task_id=2, assigned_to="test-1")`
+2. Expect: `ValueError` with message containing
+   "unmet dependencies" and "#1 (open)"
+3. Agent calls `claim_task(task_id=4, assigned_to="test-1")`
+4. Expect: `ValueError` listing both #1 and #2 as blockers
 
 **Validates**: Dependency gates block claiming. Error messages list
 specific blockers with their current status.
@@ -53,13 +71,15 @@ specific blockers with their current status.
 
 **Steps**:
 
-1. Agent calls `claim_task(task_id=4, assigned_to="test-1")`
+1. Agent calls `claim_task(task_id=1, assigned_to="test-1")`
 2. Expect: task returned with `status="in_progress"`,
    `assigned_to="test-1"`, full shape (notes, clarifications)
-3. Agent calls `add_note(task_id=4, author="test-1", content="Starting FastAPI scaffold")`
+3. Agent calls
+   `add_note(task_id=1, author="test-1",
+   content="Starting FastAPI scaffold")`
 4. Expect: note returned with `author="test-1"`, timestamp
 5. Agent calls `get_current_task(assigned_to="test-1")`
-6. Expect: returns task 4 with the note in `notes[]`
+6. Expect: returns task 1 with the note in `notes[]`
 
 **Validates**: Claim sets status and assignee. Notes persist and
 appear in task detail.
@@ -70,12 +90,12 @@ appear in task detail.
 
 **Steps**:
 
-1. Agent calls `create_clarification(task_id=4,
+1. Agent calls `create_clarification(task_id=1,
    asked_by="test-1",
    question="Should we use uvicorn or hypercorn?")`
 2. Expect: clarification returned with `status="pending"`
 3. Agent calls `get_current_task(assigned_to="test-1")`
-4. Expect: task 4 now has `status="blocked"` and the clarification
+4. Expect: task 1 now has `status="blocked"` and the clarification
    in `pending_clarifications[]`
 
 **Validates**: Creating a clarification auto-blocks the task.
@@ -91,7 +111,7 @@ appear in task detail.
 2. Expect: clarification returned with `status="answered"`,
    `answered_at` set
 3. Call `get_current_task(assigned_to="test-1")`
-4. Expect: task 4 back to `status="open"` (auto-unblocked because
+4. Expect: task 1 back to `status="open"` (auto-unblocked because
    no remaining pending clarifications)
 
 **Validates**: Answering the last pending clarification auto-unblocks
@@ -105,13 +125,13 @@ the task.
 **Steps**:
 
 1. Call `list_projects()` — expect 1 project ("the-hive")
-2. Call `list_milestones(project_id=1)` — expect "API Backend"
-   (priority 10) and "Dashboard Frontend" (priority 5), ordered by
-   priority desc
-3. Call `list_tasks(tag="backend")` — expect tasks 4, 5, 6
-4. Call `list_tasks(tag="frontend")` — expect tasks 7, 8
-5. Call `list_tasks(status="open")` — expect tasks 4-9
-   (task 4 was unblocked in T5)
+2. Call `list_milestones(project_id=<project-id>)` — expect
+   "API Backend" (priority 10) and "Dashboard Frontend"
+   (priority 5), ordered by priority desc
+3. Call `list_tasks(tag="backend")` — expect tasks 1, 2, 3
+4. Call `list_tasks(tag="frontend")` — expect tasks 4, 5
+5. Call `list_tasks(status="open")` — expect tasks 1-6
+   (task 1 was unblocked in T5)
 6. Call `list_clarifications(status="answered")` — expect the
    clarification from T4/T5
 
@@ -124,23 +144,24 @@ ordering by priority works.
 
 **Steps**:
 
-1. Call `claim_task(task_id=4, assigned_to="test-1")` (re-claim after
-   unblock)
-2. Call `add_note(task_id=4, author="test-1",
+1. Call `claim_task(task_id=1, assigned_to="test-1")` (re-claim
+   after unblock)
+2. Call `add_note(task_id=1, author="test-1",
    content="Scaffold complete, all tests passing")`
-3. Call `update_task(task_id=4, status="done")`
-4. Expect: task 4 returned with `status="done"`
+3. Call `update_task(task_id=1, status="done")`
+4. Expect: task 1 returned with `status="done"`
 5. Call `get_next_task(assigned_to="test-1")`
-6. Expect: returns task 5 OR task 6 (both now have deps met — task 4
-   is done). Should return whichever has lower sequence_order in the
-   higher-priority milestone (both are in API Backend, so task 5
-   with sequence_order=2 before task 6 with sequence_order=3)
+6. Expect: returns task 2 or task 3 (both now have deps met —
+   task 1 is done). Should return whichever has lower
+   sequence_order in the higher-priority milestone (both are in
+   API Backend, so task 2 with sequence_order=2 before task 3
+   with sequence_order=3)
 7. Call `get_next_task(assigned_to="test-2")` (different identity)
-8. Expect: also returns an available task — confirming both T5 and
-   T6 are available for parallel work
+8. Expect: also returns an available task — confirming both
+   tasks 2 and 3 are available for parallel work
 
 **Validates**: Completing a task unlocks its dependents. Parallel
-tasks (T5, T6) both become available simultaneously.
+tasks (2, 3) both become available simultaneously.
 
 ### T8: Parallel agents
 
@@ -148,17 +169,18 @@ tasks (T5, T6) both become available simultaneously.
 
 **Steps**:
 
-1. Call `claim_task(task_id=5, assigned_to="test-1")`
-2. Expect: success — task 5 now in_progress for test-1
-3. Call `claim_task(task_id=6, assigned_to="test-2")`
-4. Expect: success — task 6 now in_progress for test-2
+1. Call `claim_task(task_id=2, assigned_to="test-1")`
+2. Expect: success — task 2 now in_progress for test-1
+3. Call `claim_task(task_id=3, assigned_to="test-2")`
+4. Expect: success — task 3 now in_progress for test-2
 5. Call `get_next_task(assigned_to="test-3")`
-6. Expect: `None` — no open tasks with deps met (T7 needs T4+T5,
-   T8 needs T5+T6, T9 needs T8; T5 and T6 are in_progress)
+6. Expect: `None` — no open tasks with deps met (task 4 needs
+   1+2, task 5 needs 2+3, task 6 needs 5; tasks 2 and 3
+   are in_progress)
 
 **Validates**: Multiple agents can claim parallel tasks. Tasks with
-partially-met deps (e.g., T7 needs both T4 done AND T5 done) remain
-blocked.
+partially-met deps (e.g., task 4 needs both 1 done AND 2 done)
+remain blocked.
 
 ### T9: Release task
 
@@ -166,11 +188,11 @@ blocked.
 
 **Steps**:
 
-1. Call `release_task(task_id=6)`
-2. Expect: task 6 returned with `status="open"`,
+1. Call `release_task(task_id=3)`
+2. Expect: task 3 returned with `status="open"`,
    `assigned_to=null`
 3. Call `get_next_task(assigned_to="test-3")`
-4. Expect: returns task 6 (back in the pool)
+4. Expect: returns task 3 (back in the pool)
 
 **Validates**: Release returns a task to the open pool for other
 agents.
@@ -181,19 +203,20 @@ agents.
 
 **Steps**:
 
-1. Complete task 5: `update_task(task_id=5, status="done")`
-2. Complete task 6: claim it, then `update_task(task_id=6, status="done")`
+1. Complete task 2: `update_task(task_id=2, status="done")`
+2. Complete task 3: claim it, then
+   `update_task(task_id=3, status="done")`
 3. Call `get_next_task(assigned_to="test-1")`
-4. Expect: returns task 7 (board view) — deps T4 and T5 both done.
-   Task 8 (task detail) should also be available — deps T5 and T6
+4. Expect: returns task 4 (board view) — deps 1 and 2 both done.
+   Task 5 (task detail) should also be available — deps 2 and 3
    both done.
-5. Call `list_milestones(project_id=1)`
+5. Call `list_milestones(project_id=<project-id>)`
 6. Expect: API Backend milestone shows `task_counts.done=3`,
    Dashboard Frontend shows `task_counts.open=3`
-7. Complete tasks 7 and 8
+7. Complete tasks 4 and 5
 8. Call `get_next_task(assigned_to="test-1")`
-9. Expect: returns task 9 (GitHub integration) — dep T8 now done
-10. Complete task 9
+9. Expect: returns task 6 (GitHub integration) — dep 5 now done
+10. Complete task 6
 11. Call `get_next_task(assigned_to="test-1")`
 12. Expect: `None` — all tasks done
 
@@ -208,8 +231,8 @@ work is done.
 **Steps**:
 
 1. Call `list_projects()`
-2. Expect: "the-hive" project shows `milestone_count=2` (plus any
-   pre-existing milestones), `task_counts.done=6`
+2. Expect: "the-hive" project shows `milestone_count=2`,
+   `task_counts.done=6`
 
 **Validates**: Project aggregation rolls up across milestones.
 

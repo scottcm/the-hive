@@ -162,11 +162,11 @@ async def main():
     # Summary
     print("\n--- Dependency graph ---")
     print(f"T{t1['id']}: FastAPI scaffold (no deps — start here)")
-    print(f"T{t2['id']}: Task API → depends on T{t1['id']}")
-    print(f"T{t3['id']}: Clarification API → depends on T{t1['id']}  (parallel with T{t2['id']})")
-    print(f"T{t4['id']}: Board view → depends on T{t1['id']}, T{t2['id']}")
-    print(f"T{t5['id']}: Task detail → depends on T{t2['id']}, T{t3['id']}")
-    print(f"T{t6['id']}: GitHub integration → depends on T{t5['id']}")
+    print(f"T{t2['id']}: Task API -> depends on T{t1['id']}")
+    print(f"T{t3['id']}: Clarification API -> depends on T{t1['id']}  (parallel with T{t2['id']})")
+    print(f"T{t4['id']}: Board view -> depends on T{t1['id']}, T{t2['id']}")
+    print(f"T{t5['id']}: Task detail -> depends on T{t2['id']}, T{t3['id']}")
+    print(f"T{t6['id']}: GitHub integration -> depends on T{t5['id']}")
 
     await close_pool()
 

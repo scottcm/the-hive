@@ -664,3 +664,65 @@ async def test_no_deps_field_defaults_empty(db_pool):
     task = await tasks.claim_task(task_id, "codex")
 
     assert task["depends_on"] == []
+
+
+async def test_release_task_rejects_blocked(db_pool):
+    task_id = await insert_task(
+        db_pool, title="Blocked task", status="blocked", assigned_to="codex"
+    )
+
+    with pytest.raises(ValueError, match="cannot be released"):
+        await tasks.release_task(task_id)
+
+
+async def test_release_task_rejects_done(db_pool):
+    task_id = await insert_task(
+        db_pool, title="Done task", status="done", assigned_to="codex"
+    )
+
+    with pytest.raises(ValueError, match="cannot be released"):
+        await tasks.release_task(task_id)
+
+
+async def test_release_task_rejects_open(db_pool):
+    task_id = await insert_task(db_pool, title="Open task", status="open")
+
+    with pytest.raises(ValueError, match="cannot be released"):
+        await tasks.release_task(task_id)
+
+
+async def test_release_task_not_found(db_pool):
+    with pytest.raises(ValueError, match="not found"):
+        await tasks.release_task(9999)
+
+
+async def test_get_task_returns_full_shape(db_pool):
+    milestone_id = await insert_milestone(
+        db_pool, name="Test Milestone", description="For get_task"
+    )
+    task_id = await insert_task(
+        db_pool,
+        title="Full shape task",
+        milestone_id=milestone_id,
+        status="in_progress",
+        assigned_to="codex",
+    )
+    note_id = await insert_note(
+        db_pool, task_id=task_id, author="scott", content="A note"
+    )
+    clar_id = await insert_clarification(
+        db_pool, task_id=task_id, asked_by="codex", question="Pending?"
+    )
+
+    task = await tasks.get_task(task_id)
+
+    assert task["id"] == task_id
+    assert task["title"] == "Full shape task"
+    assert task["milestone_name"] == "Test Milestone"
+    assert task["notes"][0]["id"] == note_id
+    assert task["pending_clarifications"][0]["id"] == clar_id
+
+
+async def test_get_task_not_found(db_pool):
+    with pytest.raises(ValueError, match="Task 9999 not found"):
+        await tasks.get_task(9999)

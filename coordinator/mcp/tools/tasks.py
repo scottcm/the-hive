@@ -117,6 +117,12 @@ def _validate_task_status(status: str) -> None:
         raise ValueError(f"Invalid status: {status}")
 
 
+async def get_task(task_id: int) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        return await _fetch_task_full(task_id, conn)
+
+
 async def get_current_task(assigned_to: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -125,9 +131,9 @@ async def get_current_task(assigned_to: str) -> dict[str, Any] | None:
             f"""
             {SUMMARY_SELECT}
             WHERE t.assigned_to = %s
-              AND t.status IN ('in_progress', 'open')
+              AND t.status IN ('in_progress', 'blocked', 'open')
             ORDER BY
-                CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END,
+                CASE t.status WHEN 'in_progress' THEN 0 WHEN 'blocked' THEN 1 ELSE 2 END,
                 m.priority DESC NULLS LAST,
                 t.sequence_order,
                 t.id
@@ -216,14 +222,26 @@ async def release_task(task_id: int) -> dict[str, Any]:
                 """
                 UPDATE hive.tasks
                 SET status = 'open', assigned_to = NULL, updated_at = now()
-                WHERE id = %s
+                WHERE id = %s AND status = 'in_progress'
                 RETURNING id
                 """,
                 (task_id,),
             )
             row = await cursor.fetchone()
             if row is None:
-                raise ValueError(f"Task {task_id} not found")
+                # Distinguish "not found" from "wrong status"
+                await cursor.execute(
+                    "SELECT status FROM hive.tasks WHERE id = %s",
+                    (task_id,),
+                )
+                existing = await cursor.fetchone()
+                if existing is None:
+                    raise ValueError(f"Task {task_id} not found")
+                raise ValueError(
+                    f"Task {task_id} cannot be released"
+                    f" (status is '{existing['status']}',"
+                    f" must be 'in_progress')"
+                )
             return await _fetch_task_full(task_id, conn)
 
 
