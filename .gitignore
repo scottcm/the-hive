@@ -7,7 +7,9 @@ __pycache__/
 dist/
 *.egg-info/
 .pytest_cache/
+pytest-cache-files-*/
 
 # Agent working files (prompts, review findings, state, etc.)
 reviews/
 prompts/
+.claude/
