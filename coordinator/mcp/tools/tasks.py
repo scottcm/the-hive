@@ -412,6 +412,10 @@ def _evaluate_review_gate(
     return ("pass", "Review policy requirements satisfied")
 
 
+_HANDOFF_STR_FIELDS = ("what_changed", "why_changed")
+_HANDOFF_LIST_FIELDS = ("residual_risks", "unresolved_questions", "verification_links", "next_actions")
+
+
 def _evaluate_handoff_gate(
     evidence: dict[str, list[dict[str, Any]]],
 ) -> tuple[str, str]:
@@ -420,17 +424,21 @@ def _evaluate_handoff_gate(
         return ("fail", "No handoff_packet evidence artifact found")
 
     metadata = handoff_rows[-1]["metadata"]
-    required_fields = (
-        "what_changed",
-        "why_changed",
-        "residual_risks",
-        "unresolved_questions",
-        "verification_links",
-        "next_actions",
-    )
+    required_fields = _HANDOFF_STR_FIELDS + _HANDOFF_LIST_FIELDS
     missing = [field for field in required_fields if field not in metadata]
     if missing:
         return ("fail", "Handoff packet missing fields: " + ", ".join(missing))
+
+    type_errors = []
+    for field in _HANDOFF_STR_FIELDS:
+        if not isinstance(metadata[field], str):
+            type_errors.append(f"{field} must be a string")
+    for field in _HANDOFF_LIST_FIELDS:
+        if not isinstance(metadata[field], list):
+            type_errors.append(f"{field} must be a list")
+    if type_errors:
+        return ("fail", "Handoff packet type errors: " + "; ".join(type_errors))
+
     return ("pass", "Handoff packet contains required fields")
 
 

@@ -1498,3 +1498,105 @@ async def test_update_task_done_requires_red_before_implementation(db_pool):
 
     with pytest.raises(ValueError, match="G2"):
         await tasks.update_task(task_id=task_id, status="done")
+
+
+async def _setup_task_with_handoff(db_pool, handoff_metadata: dict) -> int:
+    """Helper: create a fully-evidenced task with a custom handoff payload."""
+    task_id = await insert_task(db_pool, title="Handoff schema task", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["pytest tests/ -k handoff-schema -v"],
+        green_tests=["pytest tests/ -k handoff-schema -v"],
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="1" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="claude-scott",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_handoff_schema"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="2" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="claude-scott",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="3" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="claude-scott",
+        metadata={"command": "pytest tests/ -k handoff-schema -v", "passed": True},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="4" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="reviewer-x",
+        metadata={"author": "claude-scott", "reviewer": "reviewer-x"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="5" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="claude-scott",
+        metadata=handoff_metadata,
+    )
+    return task_id
+
+
+async def test_update_task_done_rejects_handoff_with_wrong_field_types(db_pool):
+    task_id = await _setup_task_with_handoff(
+        db_pool,
+        {
+            "what_changed": "Added schema validation.",
+            "why_changed": "Enforce type integrity.",
+            "residual_risks": "none",  # should be list
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run review"],
+        },
+    )
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_done_rejects_handoff_with_string_fields_as_list(db_pool):
+    task_id = await _setup_task_with_handoff(
+        db_pool,
+        {
+            "what_changed": ["Added schema validation."],  # should be str
+            "why_changed": "Enforce type integrity.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run review"],
+        },
+    )
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_done_accepts_valid_handoff_schema(db_pool):
+    task_id = await _setup_task_with_handoff(
+        db_pool,
+        {
+            "what_changed": "Added schema validation.",
+            "why_changed": "Enforce type integrity.",
+            "residual_risks": ["Risk A"],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run review"],
+        },
+    )
+    task = await tasks.update_task(task_id=task_id, status="done")
+    assert task["status"] == "done"
