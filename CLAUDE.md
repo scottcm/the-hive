@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Read AGENTS.md before starting any task.
+Read AGENTS.md and AI.md before starting any task.
 
 ## Claude-specific rules
 

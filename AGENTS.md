@@ -2,6 +2,8 @@
 
 Rules for all AI agents working on the-hive.
 
+Read AI.md for system context, codebase map, and key concepts.
+
 ## Hard Requirements (Non-Negotiable)
 
 1. **Scope lock.** Edit only files listed in your prompt.
