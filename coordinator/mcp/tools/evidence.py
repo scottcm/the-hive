@@ -96,12 +96,16 @@ async def record_task_evidence(
         async with conn.transaction():
             task_cursor = conn.cursor(row_factory=dict_row)
             await task_cursor.execute(
-                "SELECT id FROM hive.tasks WHERE id = %s",
+                "SELECT id, status, updated_at FROM hive.tasks WHERE id = %s",
                 (task_id,),
             )
             task_row = await task_cursor.fetchone()
             if task_row is None:
                 raise ValueError(f"Task {task_id} not found")
+            if task_row["status"] == "done":
+                done_anchor = task_row["updated_at"] + timedelta(days=180)
+                if retention_until < done_anchor:
+                    retention_until = done_anchor
 
             cursor = conn.cursor(row_factory=dict_row)
             await cursor.execute(

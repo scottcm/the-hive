@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
+import psycopg
 import pytest
 
-from coordinator.mcp.tools import evidence
+from coordinator.mcp.tools import evidence, tasks
 
 
 async def insert_task(db_pool, *, title: str) -> int:
@@ -16,6 +17,44 @@ async def insert_task(db_pool, *, title: str) -> int:
             (title,),
         )
         return (await cursor.fetchone())[0]
+
+
+async def set_task_done_at(db_pool, *, task_id: int, done_at: datetime) -> None:
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            UPDATE hive.tasks
+            SET status = 'done', updated_at = %s
+            WHERE id = %s
+            """,
+            (done_at, task_id),
+        )
+
+
+async def fetch_evidence_retention(db_pool, *, artifact_id: int) -> datetime:
+    async with db_pool.connection() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT retention_until
+            FROM hive.task_evidence_artifacts
+            WHERE id = %s
+            """,
+            (artifact_id,),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        return row[0]
+
+
+async def fetch_task_updated_at(db_pool, *, task_id: int) -> datetime:
+    async with db_pool.connection() as conn:
+        cursor = await conn.execute(
+            "SELECT updated_at FROM hive.tasks WHERE id = %s",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        return row[0]
 
 
 async def test_record_task_evidence_round_trip(db_pool):
@@ -113,3 +152,61 @@ async def test_list_task_evidence_filters_by_artifact_type(db_pool):
     )
 
     assert [row["id"] for row in filtered] == [green["id"]]
+
+
+async def test_record_evidence_for_done_task_anchors_retention_to_done_time(db_pool):
+    task_id = await insert_task(db_pool, title="Done task")
+    captured_at = datetime(2026, 3, 6, 12, 0, tzinfo=timezone.utc)
+    done_at = datetime(2026, 3, 10, 9, 30, tzinfo=timezone.utc)
+    await set_task_done_at(db_pool, task_id=task_id, done_at=done_at)
+
+    artifact = await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="f" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        captured_at=captured_at.isoformat(),
+    )
+
+    assert datetime.fromisoformat(artifact["retention_until"]) == (
+        done_at + timedelta(days=180)
+    )
+
+
+async def test_marking_task_done_refreshes_existing_evidence_retention_floor(db_pool):
+    task_id = await insert_task(db_pool, title="Open task")
+    captured_at = datetime(2026, 3, 6, 12, 0, tzinfo=timezone.utc)
+
+    artifact = await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="9" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        captured_at=captured_at.isoformat(),
+    )
+
+    await tasks.update_task(task_id=task_id, status="done")
+    done_at = await fetch_task_updated_at(db_pool, task_id=task_id)
+    retention_until = await fetch_evidence_retention(
+        db_pool,
+        artifact_id=artifact["id"],
+    )
+
+    assert retention_until == done_at + timedelta(days=180)
+
+
+async def test_task_with_evidence_cannot_be_deleted(db_pool):
+    task_id = await insert_task(db_pool, title="Protected task")
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="8" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="codex",
+    )
+
+    async with db_pool.connection() as conn:
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            await conn.execute("DELETE FROM hive.tasks WHERE id = %s", (task_id,))

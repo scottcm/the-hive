@@ -618,13 +618,25 @@ async def update_task(
                 UPDATE hive.tasks
                 SET {", ".join(set_clauses)}
                 WHERE id = %s
-                RETURNING id
+                RETURNING id, status, updated_at
                 """,
                 params,
             )
             row = await cursor.fetchone()
             if row is None:
                 raise ValueError(f"Task {task_id} not found")
+            if row["status"] == "done":
+                await cursor.execute(
+                    """
+                    UPDATE hive.task_evidence_artifacts
+                    SET retention_until = GREATEST(
+                        retention_until,
+                        %s + INTERVAL '180 days'
+                    )
+                    WHERE task_id = %s
+                    """,
+                    (row["updated_at"], task_id),
+                )
             return await _fetch_task_full(task_id, conn)
 
 
