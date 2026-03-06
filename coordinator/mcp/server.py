@@ -7,7 +7,14 @@ from mcp.server.fastmcp import FastMCP
 
 from coordinator.db.connection import close_pool, get_pool
 from coordinator.db.migrate import run_migrations
-from coordinator.mcp.tools import clarifications, milestones, notes, projects, tasks
+from coordinator.mcp.tools import (
+    clarifications,
+    evidence,
+    milestones,
+    notes,
+    projects,
+    tasks,
+)
 
 
 @asynccontextmanager
@@ -34,6 +41,10 @@ mcp.tool()(tasks.set_task_contract)
 
 # Note tools (1)
 mcp.tool()(notes.add_note)
+
+# Evidence tools (2)
+mcp.tool()(evidence.record_task_evidence)
+mcp.tool()(evidence.list_task_evidence)
 
 # Project tools (3)
 mcp.tool()(projects.list_projects)
