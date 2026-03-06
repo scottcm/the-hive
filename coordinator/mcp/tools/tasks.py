@@ -43,6 +43,15 @@ DONE_GATE_SEQUENCE = (
     "G5_handoff_completeness",
 )
 
+OVERRIDABLE_GATES = {
+    "G1_scope_lock",
+    "G2_tdd_order",
+    "G3_verification",
+    "G4_review_separation",
+    "G5_handoff_completeness",
+    "G_start_dependencies",
+}
+
 
 def _validate_path_list(
     field_name: str,
@@ -233,6 +242,54 @@ async def _fetch_task_evidence(task_id: int, conn: Any) -> dict[str, list[dict[s
     return grouped
 
 
+async def _fetch_active_task_overrides(
+    task_id: int,
+    conn: Any,
+) -> dict[str, dict[str, Any]]:
+    cursor = conn.cursor(row_factory=dict_row)
+    await cursor.execute(
+        """
+        SELECT
+            gate_name,
+            approved_by,
+            reason,
+            expires_at,
+            created_at
+        FROM hive.task_overrides
+        WHERE task_id = %s AND expires_at > now()
+        ORDER BY created_at DESC, id DESC
+        """,
+        (task_id,),
+    )
+    overrides: dict[str, dict[str, Any]] = {}
+    for row in await cursor.fetchall():
+        if row["gate_name"] not in OVERRIDABLE_GATES:
+            continue
+        if row["gate_name"] not in overrides:
+            overrides[row["gate_name"]] = row
+    return overrides
+
+
+def _apply_gate_overrides(
+    gate_results: list[tuple[str, str, str]],
+    overrides: dict[str, dict[str, Any]],
+) -> list[tuple[str, str, str]]:
+    evaluated: list[tuple[str, str, str]] = []
+    for gate_name, decision, reason in gate_results:
+        if decision == "fail" and gate_name in overrides:
+            override = overrides[gate_name]
+            evaluated.append(
+                (
+                    gate_name,
+                    "override",
+                    f"{reason} (override by {override['approved_by']}: {override['reason']})",
+                )
+            )
+            continue
+        evaluated.append((gate_name, decision, reason))
+    return evaluated
+
+
 def _evaluate_scope_lock_gate(
     contract: dict[str, Any],
     evidence: dict[str, list[dict[str, Any]]],
@@ -284,8 +341,8 @@ def _evaluate_tdd_order_gate(
 
     first_red = red_rows[0]["captured_at"]
     first_implementation = implementation_rows[0]["captured_at"]
-    if first_red > first_implementation:
-        return ("fail", "RED evidence captured after first implementation commit")
+    if first_red >= first_implementation:
+        return ("fail", "RED evidence must be captured before first implementation commit")
     return ("pass", "RED evidence precedes implementation and includes failing tests")
 
 
@@ -424,6 +481,57 @@ async def _record_gate_event(
     )
 
 
+async def _assert_task_can_start(
+    task_id: int,
+    conn: Any,
+) -> None:
+    cursor = conn.cursor(row_factory=dict_row)
+    await cursor.execute(
+        """
+        SELECT depends_on
+        FROM hive.tasks
+        WHERE id = %s
+        """,
+        (task_id,),
+    )
+    task_row = await cursor.fetchone()
+    if task_row is None:
+        raise ValueError(f"Task {task_id} not found")
+
+    contract = await _fetch_task_contract(task_id, conn)
+    if contract is None:
+        raise ValueError(f"Task {task_id} is missing required task contract")
+
+    depends_on = task_row["depends_on"] or []
+    if sorted(contract["dependencies"]) != sorted(depends_on):
+        raise ValueError(
+            f"Task {task_id} contract dependencies do not match task depends_on"
+        )
+
+    await cursor.execute(
+        """
+        SELECT dt.id, dt.status
+        FROM hive.tasks t
+        CROSS JOIN LATERAL unnest(t.depends_on) AS dep_id
+        JOIN hive.tasks dt ON dt.id = dep_id
+        WHERE t.id = %s AND dt.status NOT IN ('done', 'cancelled')
+        """,
+        (task_id,),
+    )
+    unmet = await cursor.fetchall()
+    if not unmet:
+        return
+
+    overrides = await _fetch_active_task_overrides(task_id, conn)
+    if "G_start_dependencies" in overrides:
+        return
+
+    blockers = ", ".join(f"#{r['id']} ({r['status']})" for r in unmet)
+    raise ValueError(
+        f"Task {task_id} has unmet dependencies: {blockers}"
+    )
+
+
 def _serialize_summary_task(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -520,6 +628,140 @@ async def get_task_contract(task_id: int) -> dict[str, Any]:
         if contract is None:
             raise ValueError(f"Task {task_id} contract not found")
         return contract
+
+
+async def create_task_override(
+    task_id: int,
+    gate_name: str,
+    approved_by: str,
+    reason: str,
+    expires_at: str,
+    scope: str = "status_transition",
+) -> dict[str, Any]:
+    if gate_name not in OVERRIDABLE_GATES:
+        raise ValueError(f"Invalid gate_name for override: {gate_name}")
+    if not isinstance(approved_by, str) or approved_by.strip() == "":
+        raise ValueError("approved_by must be a non-empty string")
+    if not isinstance(reason, str) or reason.strip() == "":
+        raise ValueError("reason must be a non-empty string")
+    if not isinstance(scope, str) or scope.strip() == "":
+        raise ValueError("scope must be a non-empty string")
+    if not isinstance(expires_at, str) or expires_at.strip() == "":
+        raise ValueError("expires_at must be an ISO-8601 timestamp string")
+
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cursor = conn.cursor(row_factory=dict_row)
+            await cursor.execute(
+                "SELECT id FROM hive.tasks WHERE id = %s",
+                (task_id,),
+            )
+            if await cursor.fetchone() is None:
+                raise ValueError(f"Task {task_id} not found")
+
+            await cursor.execute(
+                """
+                INSERT INTO hive.task_overrides (
+                    task_id,
+                    gate_name,
+                    scope,
+                    approved_by,
+                    reason,
+                    expires_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::timestamptz)
+                RETURNING
+                    id,
+                    task_id,
+                    gate_name,
+                    scope,
+                    approved_by,
+                    reason,
+                    expires_at,
+                    created_at
+                """,
+                (
+                    task_id,
+                    gate_name,
+                    scope.strip(),
+                    approved_by.strip(),
+                    reason.strip(),
+                    expires_at.strip(),
+                ),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            return {
+                "id": row["id"],
+                "task_id": row["task_id"],
+                "gate_name": row["gate_name"],
+                "scope": row["scope"],
+                "approved_by": row["approved_by"],
+                "reason": row["reason"],
+                "expires_at": row["expires_at"].isoformat(),
+                "created_at": row["created_at"].isoformat(),
+            }
+
+
+async def list_task_overrides(
+    task_id: int,
+    active_only: bool = True,
+) -> list[dict[str, Any]]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cursor = conn.cursor(row_factory=dict_row)
+        if active_only:
+            await cursor.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    gate_name,
+                    scope,
+                    approved_by,
+                    reason,
+                    expires_at,
+                    created_at
+                FROM hive.task_overrides
+                WHERE task_id = %s
+                  AND expires_at > now()
+                ORDER BY created_at DESC, id DESC
+                """,
+                (task_id,),
+            )
+        else:
+            await cursor.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    gate_name,
+                    scope,
+                    approved_by,
+                    reason,
+                    expires_at,
+                    created_at
+                FROM hive.task_overrides
+                WHERE task_id = %s
+                ORDER BY created_at DESC, id DESC
+                """,
+                (task_id,),
+            )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "task_id": row["task_id"],
+                "gate_name": row["gate_name"],
+                "scope": row["scope"],
+                "approved_by": row["approved_by"],
+                "reason": row["reason"],
+                "expires_at": row["expires_at"].isoformat(),
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
 
 
 async def set_task_contract(
@@ -699,38 +941,7 @@ async def claim_task(task_id: int, assigned_to: str) -> dict[str, Any]:
                 raise ValueError(f"Task {task_id} not found")
             if existing["status"] != "open":
                 raise ValueError(f"Task {task_id} is not open")
-
-            contract = await _fetch_task_contract(task_id, conn)
-            if contract is None:
-                raise ValueError(
-                    f"Task {task_id} is missing required task contract"
-                )
-
-            depends_on = existing["depends_on"] or []
-            if sorted(contract["dependencies"]) != sorted(depends_on):
-                raise ValueError(
-                    f"Task {task_id} contract dependencies do not match task depends_on"
-                )
-
-            # Check for unmet dependencies before allowing claim
-            await cursor.execute(
-                """
-                SELECT dt.id, dt.title, dt.status
-                FROM hive.tasks t
-                CROSS JOIN LATERAL unnest(t.depends_on) AS dep_id
-                JOIN hive.tasks dt ON dt.id = dep_id
-                WHERE t.id = %s AND dt.status NOT IN ('done', 'cancelled')
-                """,
-                (task_id,),
-            )
-            unmet = await cursor.fetchall()
-            if unmet:
-                blockers = ", ".join(
-                    f"#{r['id']} ({r['status']})" for r in unmet
-                )
-                raise ValueError(
-                    f"Task {task_id} has unmet dependencies: {blockers}"
-                )
+            await _assert_task_can_start(task_id, conn)
 
             await cursor.execute(
                 """
@@ -864,10 +1075,16 @@ async def update_task(
             )
         )
 
+        if status == "in_progress" and existing["status"] != "in_progress":
+            async with conn.transaction():
+                await _assert_task_can_start(task_id, conn)
+
         if status == "done":
             gate_results: list[tuple[str, str, str]]
             async with conn.transaction():
                 gate_results = await _evaluate_done_gates(task_id, conn)
+                overrides = await _fetch_active_task_overrides(task_id, conn)
+                gate_results = _apply_gate_overrides(gate_results, overrides)
                 for gate_name, decision, reason in gate_results:
                     await _record_gate_event(
                         task_id=task_id,

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from coordinator.mcp.tools import evidence, tasks
@@ -206,6 +208,41 @@ async def fetch_gate_events(db_pool, task_id: int) -> list[tuple]:
             (task_id,),
         )
         return await cursor.fetchall()
+
+
+async def insert_task_override(
+    db_pool,
+    *,
+    task_id: int,
+    gate_name: str,
+    approved_by: str = "owner",
+    reason: str = "approved exception",
+    expires_at: datetime | None = None,
+) -> None:
+    if expires_at is None:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO hive.task_overrides (
+                task_id,
+                gate_name,
+                scope,
+                approved_by,
+                reason,
+                expires_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                task_id,
+                gate_name,
+                "status_transition",
+                approved_by,
+                reason,
+                expires_at,
+            ),
+        )
 
 
 async def test_get_current_task_in_progress(db_pool):
@@ -564,6 +601,7 @@ async def test_list_tasks_by_tag(db_pool):
 
 async def test_update_task_status(db_pool):
     task_id = await insert_task(db_pool, title="Status task", status="open")
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[])
     before_row = await fetch_task_row(db_pool, task_id)
 
     async with db_pool.connection() as conn:
@@ -1109,4 +1147,202 @@ async def test_update_task_done_rejects_self_review(db_pool):
     )
 
     with pytest.raises(ValueError, match="G4"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_in_progress_requires_contract(db_pool):
+    task_id = await insert_task(db_pool, title="Start without contract", status="open")
+
+    with pytest.raises(ValueError, match="missing required task contract"):
+        await tasks.update_task(task_id=task_id, status="in_progress")
+
+
+async def test_update_task_in_progress_rejects_unmet_dependencies(db_pool):
+    dep_id = await insert_task(db_pool, title="Dependency", status="open")
+    task_id = await insert_task(
+        db_pool,
+        title="Blocked start",
+        status="open",
+        depends_on=[dep_id],
+    )
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        dependencies=[dep_id],
+    )
+
+    with pytest.raises(ValueError, match="unmet dependencies"):
+        await tasks.update_task(task_id=task_id, status="in_progress")
+
+
+async def test_update_task_done_allows_gate_override(db_pool):
+    task_id = await insert_task(db_pool, title="Override handoff", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["pytest tests/test_mcp_tasks.py -k override -v"],
+        green_tests=["pytest tests/test_mcp_tasks.py -k override -v"],
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="f" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_override"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="1" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="2" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={"command": "pytest tests/test_mcp_tasks.py -k override -v", "passed": True},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="3" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+    await insert_task_override(
+        db_pool,
+        task_id=task_id,
+        gate_name="G5_handoff_completeness",
+    )
+
+    task = await tasks.update_task(task_id=task_id, status="done")
+    events = await fetch_gate_events(db_pool, task_id)
+
+    assert task["status"] == "done"
+    assert ("G5_handoff_completeness", "override") in events
+
+
+async def test_update_task_done_rejects_expired_override(db_pool):
+    task_id = await insert_task(db_pool, title="Expired override", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["pytest tests/test_mcp_tasks.py -k expired -v"],
+        green_tests=["pytest tests/test_mcp_tasks.py -k expired -v"],
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="4" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_expired_override"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="5" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="6" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={"command": "pytest tests/test_mcp_tasks.py -k expired -v", "passed": True},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="7" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+    await insert_task_override(
+        db_pool,
+        task_id=task_id,
+        gate_name="G5_handoff_completeness",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_done_requires_red_before_implementation(db_pool):
+    task_id = await insert_task(db_pool, title="TDD strict ordering", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["pytest tests/test_mcp_tasks.py -k tdd-order -v"],
+        green_tests=["pytest tests/test_mcp_tasks.py -k tdd-order -v"],
+    )
+    same_time = datetime(2026, 3, 6, 12, 0, tzinfo=timezone.utc).isoformat()
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="8" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        captured_at=same_time,
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_tdd_order"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="9" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        captured_at=same_time,
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="a" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={"command": "pytest tests/test_mcp_tasks.py -k tdd-order -v", "passed": True},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="b" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="c" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="codex",
+        metadata={
+            "what_changed": "Gate logic updates.",
+            "why_changed": "Enforce strict TDD ordering.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run review"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="G2"):
         await tasks.update_task(task_id=task_id, status="done")

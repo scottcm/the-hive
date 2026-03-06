@@ -301,6 +301,7 @@ async def test_get_task_full_includes_notes_and_pending_clarifications(db_pool, 
 
 async def test_patch_task_updates_fields(db_pool, client):
     task = await _create_task(client, "Patch me")
+    await _insert_task_contract(db_pool, task_id=task["id"])
 
     resp = await client.patch(
         f"/api/tasks/{task['id']}",

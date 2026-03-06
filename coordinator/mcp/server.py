@@ -38,6 +38,8 @@ mcp.tool()(tasks.list_tasks)
 mcp.tool()(tasks.update_task)
 mcp.tool()(tasks.create_task)
 mcp.tool()(tasks.set_task_contract)
+mcp.tool()(tasks.create_task_override)
+mcp.tool()(tasks.list_task_overrides)
 
 # Note tools (1)
 mcp.tool()(notes.add_note)
