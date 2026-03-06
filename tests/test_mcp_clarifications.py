@@ -211,3 +211,49 @@ async def test_list_clarifications_filter_by_status(db_pool):
 
     assert [item["id"] for item in result] == [pending_id]
     assert result[0]["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# get_clarification
+# ---------------------------------------------------------------------------
+
+
+async def test_get_clarification_returns_full_record(db_pool):
+    task_id = await insert_task(db_pool, title="Get clarification task")
+    clar_id = await insert_clarification(
+        db_pool, task_id=task_id, asked_by="codex", question="What should I do?"
+    )
+
+    clar = await clarifications.get_clarification(clar_id)
+
+    assert clar["id"] == clar_id
+    assert clar["task_id"] == task_id
+    assert clar["asked_by"] == "codex"
+    assert clar["question"] == "What should I do?"
+    assert clar["status"] == "pending"
+    assert clar["answer"] is None
+    assert "created_at" in clar
+    assert "answered_at" in clar
+
+
+async def test_get_clarification_answered(db_pool):
+    task_id = await insert_task(db_pool, title="Answered task", status="blocked")
+    clar_id = await insert_clarification(
+        db_pool,
+        task_id=task_id,
+        asked_by="codex",
+        question="Need detail?",
+        answer="Yes, use the default.",
+        status="answered",
+    )
+
+    clar = await clarifications.get_clarification(clar_id)
+
+    assert clar["id"] == clar_id
+    assert clar["status"] == "answered"
+    assert clar["answer"] == "Yes, use the default."
+
+
+async def test_get_clarification_not_found(db_pool):
+    with pytest.raises(ValueError, match="Clarification 9999 not found"):
+        await clarifications.get_clarification(9999)

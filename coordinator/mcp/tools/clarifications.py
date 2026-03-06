@@ -110,6 +110,24 @@ async def answer_clarification(clarification_id: int, answer: str) -> dict[str, 
             return clarification
 
 
+async def get_clarification(clarification_id: int) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cursor = conn.cursor(row_factory=dict_row)
+        await cursor.execute(
+            """
+            SELECT id, task_id, asked_by, question, answer, status, created_at, answered_at
+            FROM hive.clarifications
+            WHERE id = %s
+            """,
+            (clarification_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise ValueError(f"Clarification {clarification_id} not found")
+        return _serialize_clarification(row)
+
+
 async def list_clarifications(
     status: str | None = None,
     task_id: int | None = None,

@@ -1646,3 +1646,212 @@ async def test_update_task_done_rejects_handoff_with_blank_verification_link(db_
     )
     with pytest.raises(ValueError, match="G5"):
         await tasks.update_task(task_id=task_id, status="done")
+
+
+# ---------------------------------------------------------------------------
+# superseded status
+# ---------------------------------------------------------------------------
+
+
+async def test_superseded_is_valid_status(db_pool):
+    task_id = await insert_task(db_pool, title="Will be superseded", status="in_progress")
+    task = await tasks.update_task(task_id=task_id, status="superseded")
+    assert task["status"] == "superseded"
+
+
+# ---------------------------------------------------------------------------
+# list_gate_events
+# ---------------------------------------------------------------------------
+
+
+async def insert_gate_event(
+    db_pool,
+    *,
+    task_id: int,
+    gate_name: str = "G1_scope_lock",
+    decision: str = "fail",
+    reason: str = "test reason",
+    actor: str = "test-actor",
+) -> int:
+    async with db_pool.connection() as conn:
+        cursor = await conn.execute(
+            """
+            INSERT INTO hive.task_gate_events (task_id, gate_name, decision, reason, actor)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (task_id, gate_name, decision, reason, actor),
+        )
+        return (await cursor.fetchone())[0]
+
+
+async def test_list_gate_events_returns_events_for_task(db_pool):
+    task_id = await insert_task(db_pool, title="Gate event task", status="in_progress")
+    await insert_gate_event(db_pool, task_id=task_id, gate_name="G1_scope_lock", decision="fail")
+
+    events = await tasks.list_gate_events(task_id)
+    assert len(events) == 1
+    assert all(e["task_id"] == task_id for e in events)
+    event = events[0]
+    assert "id" in event
+    assert "gate_name" in event
+    assert "decision" in event
+    assert "reason" in event
+    assert "actor" in event
+    assert "created_at" in event
+
+
+async def test_list_gate_events_filter_by_gate_name(db_pool):
+    task_id = await insert_task(db_pool, title="Gate filter task", status="in_progress")
+    await insert_gate_event(db_pool, task_id=task_id, gate_name="G1_scope_lock", decision="fail")
+    await insert_gate_event(db_pool, task_id=task_id, gate_name="G2_tdd_order", decision="pass")
+
+    filtered = await tasks.list_gate_events(task_id, gate_name="G1_scope_lock")
+    assert len(filtered) == 1
+    assert filtered[0]["gate_name"] == "G1_scope_lock"
+
+
+async def test_list_gate_events_filter_by_decision(db_pool):
+    task_id = await insert_task(db_pool, title="Decision filter task", status="in_progress")
+    await insert_gate_event(db_pool, task_id=task_id, gate_name="G1_scope_lock", decision="fail")
+    await insert_gate_event(db_pool, task_id=task_id, gate_name="G2_tdd_order", decision="pass")
+
+    fail_events = await tasks.list_gate_events(task_id, decision="fail")
+    assert len(fail_events) == 1
+    assert all(e["decision"] == "fail" for e in fail_events)
+
+
+async def test_list_gate_events_empty_for_new_task(db_pool):
+    task_id = await insert_task(db_pool, title="No gate events", status="open")
+    events = await tasks.list_gate_events(task_id)
+    assert events == []
+
+
+async def test_list_gate_events_task_not_found(db_pool):
+    with pytest.raises(ValueError, match="Task 9999 not found"):
+        await tasks.list_gate_events(9999)
+
+
+# ---------------------------------------------------------------------------
+# expire_override
+# ---------------------------------------------------------------------------
+
+
+async def test_expire_override_makes_override_inactive(db_pool):
+    task_id = await insert_task(db_pool, title="Override task", status="in_progress")
+    await insert_task_override(db_pool, task_id=task_id, gate_name="G1_scope_lock")
+
+    overrides_before = await tasks.list_task_overrides(task_id)
+    assert len(overrides_before) == 1
+    override_id = overrides_before[0]["id"]
+
+    result = await tasks.expire_override(
+        override_id, actor="claude-scott", reason="no longer needed"
+    )
+
+    assert result["id"] == override_id
+    overrides_after = await tasks.list_task_overrides(task_id)
+    assert len(overrides_after) == 0
+
+
+async def test_expire_override_not_found(db_pool):
+    with pytest.raises(ValueError, match="Override 9999 not found"):
+        await tasks.expire_override(9999, actor="claude-scott", reason="test")
+
+
+# ---------------------------------------------------------------------------
+# reopen_task
+# ---------------------------------------------------------------------------
+
+
+async def test_reopen_task_from_done(db_pool):
+    task_id = await insert_task(db_pool, title="Done task", status="done")
+    task = await tasks.reopen_task(task_id, actor="claude-scott", reason="needs more work")
+    assert task["status"] == "open"
+
+
+async def test_reopen_task_from_cancelled(db_pool):
+    task_id = await insert_task(db_pool, title="Cancelled task", status="cancelled")
+    task = await tasks.reopen_task(task_id, actor="claude-scott", reason="reactivated")
+    assert task["status"] == "open"
+
+
+async def test_reopen_task_not_done_or_cancelled_fails(db_pool):
+    task_id = await insert_task(db_pool, title="Open task", status="open")
+    with pytest.raises(ValueError, match="reopen"):
+        await tasks.reopen_task(task_id, actor="claude-scott", reason="bad request")
+
+
+async def test_reopen_task_not_found(db_pool):
+    with pytest.raises(ValueError, match="Task 9999 not found"):
+        await tasks.reopen_task(9999, actor="claude-scott", reason="test")
+
+
+# ---------------------------------------------------------------------------
+# supersede_task
+# ---------------------------------------------------------------------------
+
+
+async def test_supersede_task_marks_as_superseded(db_pool):
+    original_id = await insert_task(db_pool, title="Original task", status="open")
+    replacement_id = await insert_task(db_pool, title="Replacement task", status="open")
+
+    task = await tasks.supersede_task(
+        original_id,
+        replacement_task_id=replacement_id,
+        actor="claude-scott",
+        reason="replaced by better task",
+    )
+    assert task["status"] == "superseded"
+
+
+async def test_supersede_task_not_found(db_pool):
+    replacement_id = await insert_task(db_pool, title="Replacement", status="open")
+    with pytest.raises(ValueError, match="Task 9999 not found"):
+        await tasks.supersede_task(
+            9999, replacement_task_id=replacement_id, actor="a", reason="r"
+        )
+
+
+async def test_supersede_task_replacement_not_found(db_pool):
+    original_id = await insert_task(db_pool, title="Original", status="open")
+    with pytest.raises(ValueError, match="9999 not found"):
+        await tasks.supersede_task(
+            original_id, replacement_task_id=9999, actor="a", reason="r"
+        )
+
+
+# ---------------------------------------------------------------------------
+# validate_task_contract
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_task_contract_returns_gate_results(db_pool):
+    task_id = await insert_task(db_pool, title="Validate contract task", status="in_progress")
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[])
+
+    result = await tasks.validate_task_contract(task_id)
+
+    assert "gates" in result
+    assert isinstance(result["gates"], list)
+    assert len(result["gates"]) > 0
+    gate = result["gates"][0]
+    assert "gate_name" in gate
+    assert "decision" in gate
+    assert "reason" in gate
+
+
+async def test_validate_task_contract_does_not_record_events(db_pool):
+    task_id = await insert_task(db_pool, title="Dry run task", status="in_progress")
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[])
+
+    await tasks.validate_task_contract(task_id)
+
+    events = await fetch_gate_events(db_pool, task_id)
+    assert events == []
+
+
+async def test_validate_task_contract_no_contract_fails(db_pool):
+    task_id = await insert_task(db_pool, title="No contract task", status="in_progress")
+    with pytest.raises(ValueError, match="contract"):
+        await tasks.validate_task_contract(task_id)

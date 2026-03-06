@@ -40,9 +40,15 @@ mcp.tool()(tasks.create_task)
 mcp.tool()(tasks.set_task_contract)
 mcp.tool()(tasks.create_task_override)
 mcp.tool()(tasks.list_task_overrides)
+mcp.tool()(tasks.list_gate_events)
+mcp.tool()(tasks.expire_override)
+mcp.tool()(tasks.reopen_task)
+mcp.tool()(tasks.supersede_task)
+mcp.tool()(tasks.validate_task_contract)
 
-# Note tools (1)
+# Note tools
 mcp.tool()(notes.add_note)
+mcp.tool()(notes.list_notes)
 
 # Evidence tools (2)
 mcp.tool()(evidence.record_task_evidence)
@@ -58,10 +64,11 @@ mcp.tool()(milestones.list_milestones)
 mcp.tool()(milestones.create_milestone)
 mcp.tool()(milestones.update_milestone)
 
-# Clarification tools (3)
+# Clarification tools
 mcp.tool()(clarifications.create_clarification)
 mcp.tool()(clarifications.answer_clarification)
 mcp.tool()(clarifications.list_clarifications)
+mcp.tool()(clarifications.get_clarification)
 
 
 def _ensure_compatible_event_loop_policy() -> None:

@@ -7,7 +7,7 @@ from psycopg.rows import dict_row
 
 from coordinator.db.connection import get_pool
 
-TASK_STATUSES = {"open", "in_progress", "blocked", "done", "cancelled"}
+TASK_STATUSES = {"open", "in_progress", "blocked", "done", "cancelled", "superseded"}
 SUMMARY_SELECT = """
     SELECT
         t.id,
@@ -1241,3 +1241,169 @@ async def create_task(
             row = await cursor.fetchone()
             assert row is not None
             return await _fetch_task_summary(row["id"], conn)
+
+
+async def list_gate_events(
+    task_id: int,
+    gate_name: str | None = None,
+    decision: str | None = None,
+    limit: int = 100,
+    cursor: int | None = None,
+) -> list[dict[str, Any]]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        check = conn.cursor()
+        await check.execute("SELECT 1 FROM hive.tasks WHERE id = %s", (task_id,))
+        if await check.fetchone() is None:
+            raise ValueError(f"Task {task_id} not found")
+
+        conditions = ["task_id = %s"]
+        params: list[Any] = [task_id]
+        if gate_name is not None:
+            conditions.append("gate_name = %s")
+            params.append(gate_name)
+        if decision is not None:
+            conditions.append("decision = %s")
+            params.append(decision)
+        if cursor is not None:
+            conditions.append("id < %s")
+            params.append(cursor)
+        params.append(limit)
+
+        cur = conn.cursor(row_factory=dict_row)
+        await cur.execute(
+            f"""
+            SELECT id, task_id, gate_name, decision, reason, actor, artifact_ref, created_at
+            FROM hive.task_gate_events
+            WHERE {" AND ".join(conditions)}
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "gate_name": row["gate_name"],
+            "decision": row["decision"],
+            "reason": row["reason"],
+            "actor": row["actor"],
+            "artifact_ref": row["artifact_ref"],
+            "created_at": row["created_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+
+async def expire_override(
+    override_id: int,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute(
+                """
+                UPDATE hive.task_overrides
+                SET expires_at = now(), updated_at = now()
+                WHERE id = %s
+                RETURNING id, task_id, gate_name, scope, approved_by, reason, expires_at, created_at
+                """,
+                (override_id,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"Override {override_id} not found")
+            return {
+                "id": row["id"],
+                "task_id": row["task_id"],
+                "gate_name": row["gate_name"],
+                "scope": row["scope"],
+                "approved_by": row["approved_by"],
+                "reason": row["reason"],
+                "expires_at": row["expires_at"].isoformat(),
+                "created_at": row["created_at"].isoformat(),
+                "expired_by": actor,
+                "expired_reason": reason,
+            }
+
+
+async def reopen_task(task_id: int, actor: str, reason: str) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute(
+                "SELECT id, status FROM hive.tasks WHERE id = %s",
+                (task_id,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"Task {task_id} not found")
+            if row["status"] not in ("done", "cancelled", "superseded"):
+                raise ValueError(
+                    f"Cannot reopen task {task_id} with status '{row['status']}': "
+                    "only done, cancelled, or superseded tasks can be reopened"
+                )
+            await cur.execute(
+                """
+                UPDATE hive.tasks
+                SET status = 'open', updated_at = now()
+                WHERE id = %s
+                """,
+                (task_id,),
+            )
+            return await _fetch_task_full(task_id, conn)
+
+
+async def supersede_task(
+    task_id: int,
+    replacement_task_id: int,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute("SELECT id FROM hive.tasks WHERE id = %s", (task_id,))
+            if await cur.fetchone() is None:
+                raise ValueError(f"Task {task_id} not found")
+            await cur.execute(
+                "SELECT id FROM hive.tasks WHERE id = %s", (replacement_task_id,)
+            )
+            if await cur.fetchone() is None:
+                raise ValueError(f"Replacement task {replacement_task_id} not found")
+            await cur.execute(
+                """
+                UPDATE hive.tasks
+                SET status = 'superseded', updated_at = now()
+                WHERE id = %s
+                """,
+                (task_id,),
+            )
+            return await _fetch_task_full(task_id, conn)
+
+
+async def validate_task_contract(task_id: int) -> dict[str, Any]:
+    """Dry-run the done gates for a task without recording any events."""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        contract = await _fetch_task_contract(task_id, conn)
+        if contract is None:
+            raise ValueError(f"Task {task_id} has no contract")
+        gate_results = await _evaluate_done_gates(task_id, conn)
+        overrides = await _fetch_active_task_overrides(task_id, conn)
+        gate_results = _apply_gate_overrides(gate_results, overrides)
+    return {
+        "task_id": task_id,
+        "gates": [
+            {"gate_name": gate_name, "decision": decision, "reason": reason}
+            for gate_name, decision, reason in gate_results
+        ],
+        "all_pass": all(decision == "pass" for _, decision, _ in gate_results),
+    }
