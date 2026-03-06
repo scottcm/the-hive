@@ -169,6 +169,8 @@ Transition guards:
 - Required full suite command must pass (or documented pre-approved exception).
 - Phase 1 default is full-suite required for every task. Exceptions require an
   override record with owner approval and expiry.
+- If post-completion verification fails, the task must be returned from `done`
+  to `in_progress` (or `changes_requested`) until GREEN evidence is restored.
 
 ### Gate G4: Review Separation
 

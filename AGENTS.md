@@ -25,6 +25,9 @@ git diff --name-only HEAD
 ### Gate 2: Tests Pass
 
 Paste full pytest output. All tests must pass with zero failures.
+If a task marked `done` later shows test failures, immediately move it back to
+`in_progress` (or `changes_requested`) and attach failure evidence before any
+new implementation work.
 
 ### Gate 3: Self-Audit
 
