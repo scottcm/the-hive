@@ -35,6 +35,15 @@ class TaskNoteCreate(BaseModel):
     content: str
 
 
+class TaskContractSet(BaseModel):
+    allowed_paths: list[str]
+    forbidden_paths: list[str] = []
+    dependencies: list[int] | None = None
+    required_tests: dict[str, list[str]] | None = None
+    review_policy: dict[str, Any] | None = None
+    handoff_template: str = "v1_task_handoff"
+
+
 def _error(status_code: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"error": message})
 
@@ -120,6 +129,22 @@ async def claim_task(task_id: int, body: TaskClaim) -> Any:
 async def release_task(task_id: int) -> Any:
     try:
         return await tasks.release_task(task_id=task_id)
+    except ValueError as exc:
+        return _map_value_error(exc)
+
+
+@router.put("/tasks/{task_id}/contract")
+async def set_task_contract(task_id: int, body: TaskContractSet) -> Any:
+    try:
+        return await tasks.set_task_contract(
+            task_id=task_id,
+            allowed_paths=body.allowed_paths,
+            forbidden_paths=body.forbidden_paths,
+            dependencies=body.dependencies,
+            required_tests=body.required_tests,
+            review_policy=body.review_policy,
+            handoff_template=body.handoff_template,
+        )
     except ValueError as exc:
         return _map_value_error(exc)
 
