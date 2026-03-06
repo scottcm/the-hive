@@ -21,6 +21,8 @@ SUMMARY_SELECT = """
         t.relevant_docs,
         t.sequence_order,
         t.depends_on,
+        t.created_at,
+        t.updated_at,
         m.name AS milestone_name,
         m.description AS milestone_description
     FROM hive.tasks t
@@ -562,6 +564,8 @@ def _serialize_summary_task(row: dict[str, Any]) -> dict[str, Any]:
         "relevant_docs": row["relevant_docs"],
         "sequence_order": row["sequence_order"],
         "depends_on": row["depends_on"],
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
     }
 
 
@@ -607,21 +611,58 @@ async def _fetch_task_full(task_id: int, conn: Any) -> dict[str, Any]:
     clarifications_cursor = conn.cursor(row_factory=dict_row)
     await clarifications_cursor.execute(
         """
-        SELECT id, question, status
+        SELECT id, asked_by, question, answer, status, created_at, answered_at
         FROM hive.clarifications
-        WHERE task_id = %s AND status = 'pending'
+        WHERE task_id = %s
         ORDER BY created_at, id
         """,
         (task_id,),
     )
+    all_clarifications = await clarifications_cursor.fetchall()
     task["pending_clarifications"] = [
+        {"id": row["id"], "question": row["question"], "status": row["status"]}
+        for row in all_clarifications
+        if row["status"] == "pending"
+    ]
+    task["clarifications"] = [
         {
             "id": row["id"],
+            "asked_by": row["asked_by"],
             "question": row["question"],
+            "answer": row["answer"],
             "status": row["status"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "answered_at": row["answered_at"].isoformat() if row["answered_at"] else None,
         }
-        for row in await clarifications_cursor.fetchall()
+        for row in all_clarifications
     ]
+
+    dep_ids = task.get("depends_on") or []
+    if dep_ids:
+        blocked_by_cursor = conn.cursor(row_factory=dict_row)
+        await blocked_by_cursor.execute(
+            """
+            SELECT id, title, status
+            FROM hive.tasks
+            WHERE id = ANY(%s) AND status NOT IN ('done', 'cancelled')
+            """,
+            (dep_ids,),
+        )
+        task["blocked_by"] = [dict(row) for row in await blocked_by_cursor.fetchall()]
+    else:
+        task["blocked_by"] = []
+
+    blocks_cursor = conn.cursor(row_factory=dict_row)
+    await blocks_cursor.execute(
+        """
+        SELECT id, title, status
+        FROM hive.tasks
+        WHERE %s = ANY(depends_on)
+        """,
+        (task_id,),
+    )
+    task["blocks"] = [dict(row) for row in await blocks_cursor.fetchall()]
+
     return task
 
 

@@ -347,6 +347,107 @@ async def test_add_note(db_pool, client):
     assert data["content"] == "Starting task"
 
 
+async def test_get_task_detail_includes_timestamps(db_pool, client):
+    task = await _create_task(client, "Timestamps task")
+
+    resp = await client.get(f"/api/tasks/{task['id']}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "created_at" in data
+    assert "updated_at" in data
+    assert data["created_at"] is not None
+    assert data["updated_at"] is not None
+
+
+async def test_get_task_detail_includes_all_clarifications(db_pool, client):
+    task = await _create_task(client, "Clarifications task")
+    await _insert_clarification(
+        db_pool,
+        task_id=task["id"],
+        asked_by="agent-1",
+        question="Pending question?",
+        status="pending",
+    )
+    await _insert_clarification(
+        db_pool,
+        task_id=task["id"],
+        asked_by="agent-2",
+        question="Already answered?",
+        answer="Yes, use uvicorn.",
+        status="answered",
+    )
+
+    resp = await client.get(f"/api/tasks/{task['id']}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "clarifications" in data
+    assert len(data["clarifications"]) == 2
+    statuses = {c["status"] for c in data["clarifications"]}
+    assert statuses == {"pending", "answered"}
+    answered = next(c for c in data["clarifications"] if c["status"] == "answered")
+    assert answered["asked_by"] == "agent-2"
+    assert answered["question"] == "Already answered?"
+    assert answered["answer"] == "Yes, use uvicorn."
+    assert "created_at" in answered
+    assert "answered_at" in answered
+
+
+async def test_get_task_detail_includes_dependency_summaries(db_pool, client):
+    dep_done = await _create_task(client, "Done dep")
+    dep_open = await _create_task(client, "Open dep")
+    task_resp = await client.post(
+        "/api/tasks",
+        json={"title": "Middle task", "depends_on": [dep_done["id"], dep_open["id"]]},
+    )
+    task = task_resp.json()
+    downstream = await client.post(
+        "/api/tasks",
+        json={"title": "Downstream task", "depends_on": [task["id"]]},
+    )
+
+    # Mark dep_done as done (needs contract + evidence)
+    await _insert_task_contract(db_pool, task_id=dep_done["id"])
+    for artifact_type, hash_suffix, meta in [
+        ("red_run", "1", {"failing_tests": ["t"]}),
+        ("implementation_commit", "2", {"changed_files": ["coordinator/web/routes/tasks.py"]}),
+        ("green_run", "3", {"command": "pytest tests/test_web_tasks.py -k claim", "passed": True}),
+        ("review_output", "4", {"author": "codex1", "reviewer": "claude"}),
+        ("handoff_packet", "5", {
+            "what_changed": "done", "why_changed": "done",
+            "residual_risks": [], "unresolved_questions": [],
+            "verification_links": ["file://x"], "next_actions": [],
+        }),
+    ]:
+        await _insert_task_evidence(
+            db_pool, task_id=dep_done["id"],
+            artifact_type=artifact_type,
+            artifact_hash_sha256=hash_suffix * 64,
+            captured_by="codex1", metadata=meta,
+        )
+    await client.patch(f"/api/tasks/{dep_done['id']}", json={"status": "done", "assigned_to": "codex1"})
+
+    resp = await client.get(f"/api/tasks/{task['id']}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "blocked_by" in data
+    assert "blocks" in data
+    # dep_open is not done — should appear in blocked_by
+    blocked_by_ids = [t["id"] for t in data["blocked_by"]]
+    assert dep_open["id"] in blocked_by_ids
+    assert dep_done["id"] not in blocked_by_ids
+    # downstream depends on this task — should appear in blocks
+    blocks_ids = [t["id"] for t in data["blocks"]]
+    assert downstream.json()["id"] in blocks_ids
+    # summaries have required fields
+    for summary in data["blocked_by"] + data["blocks"]:
+        assert "id" in summary
+        assert "title" in summary
+        assert "status" in summary
+
+
 async def test_get_task_not_found_returns_404_error(db_pool, client):
     resp = await client.get("/api/tasks/9999")
 

@@ -631,21 +631,19 @@ async def test_create_task_minimal(db_pool):
     task = await tasks.create_task("Minimal task")
     row = await fetch_task_row(db_pool, task["id"])
 
-    assert task == {
-        "id": task["id"],
-        "title": "Minimal task",
-        "description": None,
-        "status": "open",
-        "assigned_to": None,
-        "milestone_id": None,
-        "milestone_name": None,
-        "milestone_description": None,
-        "github_issues": [],
-        "tags": [],
-        "relevant_docs": [],
-        "sequence_order": 0,
-        "depends_on": [],
-    }
+    assert task["id"] is not None
+    assert task["title"] == "Minimal task"
+    assert task["description"] is None
+    assert task["status"] == "open"
+    assert task["assigned_to"] is None
+    assert task["milestone_id"] is None
+    assert task["github_issues"] == []
+    assert task["tags"] == []
+    assert task["relevant_docs"] == []
+    assert task["sequence_order"] == 0
+    assert task["depends_on"] == []
+    assert task["created_at"] is not None
+    assert task["updated_at"] is not None
     assert row[:9] == (None, "Minimal task", None, "open", 0, None, [], [], [])
 
 
