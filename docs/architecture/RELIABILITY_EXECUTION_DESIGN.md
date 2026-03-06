@@ -100,7 +100,8 @@ Every completed task produces a structured handoff containing:
 
 ### 6.5 Independent Review Gate
 
-The author cannot approve their own task completion.
+Policy: self-review is prohibited.
+The implementation author cannot review or approve their own code.
 `done` requires at least one independent review result.
 
 ### 6.6 Artifact Integrity and Retention
@@ -171,7 +172,8 @@ Transition guards:
 
 ### Gate G4: Review Separation
 
-- Reviewer identity must differ from author identity.
+- Reviewer identity must differ from author identity (`reviewer != author`).
+- A self-review is invalid and does not satisfy completion gates.
 - Critical findings must be resolved or explicitly accepted by owner override.
 
 ### Gate G5: Handoff Completeness
