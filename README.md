@@ -40,5 +40,5 @@ docker compose up
 ## Test
 
 ```bash
-uv run pytest tests/ -v
+./scripts/run-tests.ps1 tests/ -v
 ```
