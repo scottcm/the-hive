@@ -404,7 +404,7 @@ def _evaluate_review_gate(
             for reviewer, author in parsed_reviews
             if reviewer != author
         ]
-        if len(independent_reviews) < min_reviews:
+        if len(independent_reviews) < 1:
             return (
                 "fail",
                 "Independent review requirement failed: reviewer must differ from author",

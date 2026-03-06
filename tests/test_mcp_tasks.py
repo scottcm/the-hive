@@ -1150,6 +1150,82 @@ async def test_update_task_done_rejects_self_review(db_pool):
         await tasks.update_task(task_id=task_id, status="done")
 
 
+async def test_update_task_done_accepts_mixed_reviews_with_one_independent(db_pool):
+    task_id = await insert_task(db_pool, title="Mixed reviews", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["pytest tests/test_mcp_tasks.py -k mixed-review -v"],
+        green_tests=["pytest tests/test_mcp_tasks.py -k mixed-review -v"],
+        min_reviews=2,
+        independent_required=True,
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="f" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_mixed_review"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="1" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="2" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={
+            "command": "pytest tests/test_mcp_tasks.py -k mixed-review -v",
+            "passed": True,
+        },
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="3" * 64,
+        storage_ref="file://artifacts/review-1.md",
+        captured_by="codex",
+        metadata={"author": "codex", "reviewer": "codex"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="4" * 64,
+        storage_ref="file://artifacts/review-2.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="5" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="codex",
+        metadata={
+            "what_changed": "Implemented gate engine.",
+            "why_changed": "Enforce reliability policy.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run independent review"],
+        },
+    )
+
+    task = await tasks.update_task(task_id=task_id, status="done")
+
+    assert task["status"] == "done"
+
+
 async def test_update_task_in_progress_requires_contract(db_pool):
     task_id = await insert_task(db_pool, title="Start without contract", status="open")
 
