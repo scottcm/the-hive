@@ -1600,3 +1600,51 @@ async def test_update_task_done_accepts_valid_handoff_schema(db_pool):
     )
     task = await tasks.update_task(task_id=task_id, status="done")
     assert task["status"] == "done"
+
+
+async def test_update_task_done_rejects_handoff_with_empty_verification_links(db_pool):
+    task_id = await _setup_task_with_handoff(
+        db_pool,
+        {
+            "what_changed": "Added schema validation.",
+            "why_changed": "Enforce type integrity.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": [],  # empty — no usable evidence link
+            "next_actions": ["Run review"],
+        },
+    )
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_done_rejects_handoff_with_non_string_verification_link(db_pool):
+    task_id = await _setup_task_with_handoff(
+        db_pool,
+        {
+            "what_changed": "Added schema validation.",
+            "why_changed": "Enforce type integrity.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": [123],  # non-string entry
+            "next_actions": ["Run review"],
+        },
+    )
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_done_rejects_handoff_with_blank_verification_link(db_pool):
+    task_id = await _setup_task_with_handoff(
+        db_pool,
+        {
+            "what_changed": "Added schema validation.",
+            "why_changed": "Enforce type integrity.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": [""],  # blank string — not a usable link
+            "next_actions": ["Run review"],
+        },
+    )
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")

@@ -439,6 +439,13 @@ def _evaluate_handoff_gate(
     if type_errors:
         return ("fail", "Handoff packet type errors: " + "; ".join(type_errors))
 
+    links = metadata["verification_links"]
+    if not links:
+        return ("fail", "Handoff packet verification_links must contain at least one entry")
+    invalid_links = [i for i, v in enumerate(links) if not isinstance(v, str) or not v.strip()]
+    if invalid_links:
+        return ("fail", f"Handoff packet verification_links has invalid entries at positions: {invalid_links}")
+
     return ("pass", "Handoff packet contains required fields")
 
 
