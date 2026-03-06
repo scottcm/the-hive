@@ -111,6 +111,64 @@ async def insert_clarification(
         return (await cursor.fetchone())[0]
 
 
+async def insert_task_contract(
+    db_pool,
+    *,
+    task_id: int,
+    allowed_paths: list[str] | None = None,
+    forbidden_paths: list[str] | None = None,
+    dependencies: list[int] | None = None,
+    red_tests: list[str] | None = None,
+    green_tests: list[str] | None = None,
+    min_reviews: int = 1,
+    independent_required: bool = True,
+    handoff_template: str = "v1_task_handoff",
+) -> None:
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO hive.task_contracts (
+                task_id,
+                contract_version,
+                allowed_paths,
+                forbidden_paths,
+                dependencies,
+                required_tests,
+                review_policy,
+                handoff_template
+            )
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+            """,
+            (
+                task_id,
+                1,
+                allowed_paths or ["coordinator/**"],
+                forbidden_paths or [],
+                dependencies or [],
+                (
+                    '{"red": ["pytest tests/test_mcp_tasks.py -k claim"], '
+                    '"green": ["pytest tests/test_mcp_tasks.py -k claim"]}'
+                    if red_tests is None and green_tests is None
+                    else (
+                        '{"red": ['
+                        + ", ".join(f'"{cmd}"' for cmd in (red_tests or []))
+                        + '], "green": ['
+                        + ", ".join(f'"{cmd}"' for cmd in (green_tests or []))
+                        + "]}"
+                    )
+                ),
+                (
+                    '{"min_reviews": '
+                    + str(min_reviews)
+                    + ', "independent_required": '
+                    + ("true" if independent_required else "false")
+                    + "}"
+                ),
+                handoff_template,
+            ),
+        )
+
+
 async def fetch_task_row(db_pool, task_id: int) -> tuple:
     async with db_pool.connection() as conn:
         cursor = await conn.execute(
@@ -347,6 +405,7 @@ async def test_claim_task_success(db_pool):
         answer="Resolved",
         status="answered",
     )
+    await insert_task_contract(db_pool, task_id=task_id)
 
     task = await tasks.claim_task(task_id, "codex")
     row = await fetch_task_row(db_pool, task_id)
@@ -611,6 +670,11 @@ async def test_claim_task_with_unmet_deps_fails(db_pool):
     dependent_id = await insert_task(
         db_pool, title="Blocked", status="open", depends_on=[dep_id]
     )
+    await insert_task_contract(
+        db_pool,
+        task_id=dependent_id,
+        dependencies=[dep_id],
+    )
 
     with pytest.raises(ValueError, match="unmet dependencies"):
         await tasks.claim_task(dependent_id, "codex")
@@ -620,6 +684,11 @@ async def test_claim_task_with_met_deps_succeeds(db_pool):
     dep_id = await insert_task(db_pool, title="Done", status="done")
     dependent_id = await insert_task(
         db_pool, title="Ready", status="open", depends_on=[dep_id]
+    )
+    await insert_task_contract(
+        db_pool,
+        task_id=dependent_id,
+        dependencies=[dep_id],
     )
 
     task = await tasks.claim_task(dependent_id, "codex")
@@ -636,6 +705,11 @@ async def test_claim_task_unmet_deps_error_lists_blockers(db_pool):
         status="open",
         depends_on=[dep1_id, dep2_id],
     )
+    await insert_task_contract(
+        db_pool,
+        task_id=dependent_id,
+        dependencies=[dep1_id, dep2_id],
+    )
 
     with pytest.raises(ValueError, match=f"#{dep1_id}") as exc_info:
         await tasks.claim_task(dependent_id, "codex")
@@ -651,6 +725,16 @@ async def test_parallel_tasks_both_claimable(db_pool):
     task_b_id = await insert_task(
         db_pool, title="Task B", status="open", depends_on=[dep_id]
     )
+    await insert_task_contract(
+        db_pool,
+        task_id=task_a_id,
+        dependencies=[dep_id],
+    )
+    await insert_task_contract(
+        db_pool,
+        task_id=task_b_id,
+        dependencies=[dep_id],
+    )
 
     task_a = await tasks.claim_task(task_a_id, "codex")
     task_b = await tasks.claim_task(task_b_id, "claude")
@@ -661,9 +745,17 @@ async def test_parallel_tasks_both_claimable(db_pool):
 
 async def test_no_deps_field_defaults_empty(db_pool):
     task_id = await insert_task(db_pool, title="No deps")
+    await insert_task_contract(db_pool, task_id=task_id)
     task = await tasks.claim_task(task_id, "codex")
 
     assert task["depends_on"] == []
+
+
+async def test_claim_task_requires_contract(db_pool):
+    task_id = await insert_task(db_pool, title="No contract", status="open")
+
+    with pytest.raises(ValueError, match="missing required task contract"):
+        await tasks.claim_task(task_id, "codex")
 
 
 async def test_release_task_rejects_blocked(db_pool):
@@ -726,3 +818,42 @@ async def test_get_task_returns_full_shape(db_pool):
 async def test_get_task_not_found(db_pool):
     with pytest.raises(ValueError, match="Task 9999 not found"):
         await tasks.get_task(9999)
+
+
+async def test_set_task_contract_round_trip(db_pool):
+    task_id = await insert_task(db_pool, title="Contracted task", status="open")
+
+    contract = await tasks.set_task_contract(
+        task_id=task_id,
+        allowed_paths=["coordinator/**", "tests/**"],
+        forbidden_paths=["dashboard/**"],
+        dependencies=[],
+        required_tests={
+            "red": ["pytest tests/test_mcp_tasks.py -k contract"],
+            "green": ["pytest tests/test_mcp_tasks.py -k contract -v"],
+        },
+        review_policy={"min_reviews": 1, "independent_required": True},
+        handoff_template="v1_task_handoff",
+    )
+
+    fetched = await tasks.get_task_contract(task_id)
+
+    assert contract["task_id"] == task_id
+    assert contract["allowed_paths"] == ["coordinator/**", "tests/**"]
+    assert contract["forbidden_paths"] == ["dashboard/**"]
+    assert contract["required_tests"]["red"] == [
+        "pytest tests/test_mcp_tasks.py -k contract"
+    ]
+    assert fetched == contract
+
+
+async def test_set_task_contract_rejects_invalid_payload(db_pool):
+    task_id = await insert_task(db_pool, title="Invalid contract", status="open")
+
+    with pytest.raises(ValueError, match="required_tests.green"):
+        await tasks.set_task_contract(
+            task_id=task_id,
+            allowed_paths=["coordinator/**"],
+            required_tests={"red": ["pytest tests/ -k red"], "green": []},
+            review_policy={"min_reviews": 1, "independent_required": True},
+        )

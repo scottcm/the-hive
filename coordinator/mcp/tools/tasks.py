@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import psycopg
@@ -32,6 +33,162 @@ DEPS_MET_CONDITION = """
         WHERE dt.status NOT IN ('done', 'cancelled')
     )
 """
+
+
+def _validate_path_list(
+    field_name: str,
+    paths: list[Any],
+    *,
+    allow_empty: bool,
+) -> list[str]:
+    if not isinstance(paths, list):
+        raise ValueError(f"Task contract {field_name} must be a list of strings")
+    if not allow_empty and len(paths) == 0:
+        raise ValueError(f"Task contract {field_name} must not be empty")
+    normalized: list[str] = []
+    for path in paths:
+        if not isinstance(path, str) or path.strip() == "":
+            raise ValueError(
+                f"Task contract {field_name} must contain non-empty strings"
+            )
+        normalized.append(path.strip())
+    return normalized
+
+
+def _validate_int_list(
+    field_name: str,
+    values: list[Any],
+) -> list[int]:
+    if not isinstance(values, list):
+        raise ValueError(f"Task contract {field_name} must be a list of integers")
+    normalized: list[int] = []
+    for value in values:
+        if not isinstance(value, int):
+            raise ValueError(f"Task contract {field_name} must contain integers")
+        normalized.append(value)
+    return normalized
+
+
+def _validate_required_tests(required_tests: Any) -> dict[str, list[str]]:
+    if not isinstance(required_tests, dict):
+        raise ValueError("Task contract required_tests must be an object")
+    red_raw = required_tests.get("red")
+    green_raw = required_tests.get("green")
+    red = _validate_path_list("required_tests.red", red_raw, allow_empty=False)
+    green = _validate_path_list(
+        "required_tests.green",
+        green_raw,
+        allow_empty=False,
+    )
+    return {"red": red, "green": green}
+
+
+def _validate_review_policy(review_policy: Any) -> dict[str, Any]:
+    if not isinstance(review_policy, dict):
+        raise ValueError("Task contract review_policy must be an object")
+
+    min_reviews = review_policy.get("min_reviews")
+    independent_required = review_policy.get("independent_required")
+
+    if not isinstance(min_reviews, int) or min_reviews < 1:
+        raise ValueError("Task contract review_policy.min_reviews must be >= 1")
+    if not isinstance(independent_required, bool):
+        raise ValueError(
+            "Task contract review_policy.independent_required must be boolean"
+        )
+    return {
+        "min_reviews": min_reviews,
+        "independent_required": independent_required,
+    }
+
+
+def _normalize_task_contract_payload(
+    *,
+    allowed_paths: list[Any],
+    forbidden_paths: list[Any],
+    dependencies: list[Any],
+    required_tests: Any,
+    review_policy: Any,
+    handoff_template: str,
+    contract_version: int,
+) -> dict[str, Any]:
+    if not isinstance(contract_version, int) or contract_version < 1:
+        raise ValueError("Task contract contract_version must be >= 1")
+    if not isinstance(handoff_template, str) or handoff_template.strip() == "":
+        raise ValueError("Task contract handoff_template must be a non-empty string")
+
+    return {
+        "contract_version": contract_version,
+        "allowed_paths": _validate_path_list(
+            "allowed_paths",
+            allowed_paths,
+            allow_empty=False,
+        ),
+        "forbidden_paths": _validate_path_list(
+            "forbidden_paths",
+            forbidden_paths,
+            allow_empty=True,
+        ),
+        "dependencies": _validate_int_list("dependencies", dependencies),
+        "required_tests": _validate_required_tests(required_tests),
+        "review_policy": _validate_review_policy(review_policy),
+        "handoff_template": handoff_template.strip(),
+    }
+
+
+def _serialize_task_contract(row: dict[str, Any]) -> dict[str, Any]:
+    required_tests = row["required_tests"]
+    review_policy = row["review_policy"]
+
+    if isinstance(required_tests, str):
+        required_tests = json.loads(required_tests)
+    if isinstance(review_policy, str):
+        review_policy = json.loads(review_policy)
+
+    normalized = _normalize_task_contract_payload(
+        allowed_paths=row["allowed_paths"],
+        forbidden_paths=row["forbidden_paths"],
+        dependencies=row["dependencies"],
+        required_tests=required_tests,
+        review_policy=review_policy,
+        handoff_template=row["handoff_template"],
+        contract_version=row["contract_version"],
+    )
+    return {
+        "task_id": row["task_id"],
+        **normalized,
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+    }
+
+
+async def _fetch_task_contract(
+    task_id: int,
+    conn: Any,
+) -> dict[str, Any] | None:
+    cursor = conn.cursor(row_factory=dict_row)
+    await cursor.execute(
+        """
+        SELECT
+            task_id,
+            contract_version,
+            allowed_paths,
+            forbidden_paths,
+            dependencies,
+            required_tests,
+            review_policy,
+            handoff_template,
+            created_at,
+            updated_at
+        FROM hive.task_contracts
+        WHERE task_id = %s
+        """,
+        (task_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return _serialize_task_contract(row)
 
 
 def _serialize_summary_task(row: dict[str, Any]) -> dict[str, Any]:
@@ -123,6 +280,97 @@ async def get_task(task_id: int) -> dict[str, Any]:
         return await _fetch_task_full(task_id, conn)
 
 
+async def get_task_contract(task_id: int) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        contract = await _fetch_task_contract(task_id, conn)
+        if contract is None:
+            raise ValueError(f"Task {task_id} contract not found")
+        return contract
+
+
+async def set_task_contract(
+    task_id: int,
+    allowed_paths: list[str],
+    forbidden_paths: list[str] | None = None,
+    dependencies: list[int] | None = None,
+    required_tests: dict[str, list[str]] | None = None,
+    review_policy: dict[str, Any] | None = None,
+    handoff_template: str = "v1_task_handoff",
+    contract_version: int = 1,
+) -> dict[str, Any]:
+    normalized = _normalize_task_contract_payload(
+        allowed_paths=allowed_paths,
+        forbidden_paths=forbidden_paths or [],
+        dependencies=dependencies or [],
+        required_tests=required_tests
+        or {
+            "red": ["pytest tests/ -k <task_red>"],
+            "green": ["pytest tests/ -v"],
+        },
+        review_policy=review_policy
+        or {
+            "min_reviews": 1,
+            "independent_required": True,
+        },
+        handoff_template=handoff_template,
+        contract_version=contract_version,
+    )
+
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cursor = conn.cursor(row_factory=dict_row)
+            await cursor.execute(
+                "SELECT id FROM hive.tasks WHERE id = %s",
+                (task_id,),
+            )
+            task_row = await cursor.fetchone()
+            if task_row is None:
+                raise ValueError(f"Task {task_id} not found")
+
+            await cursor.execute(
+                """
+                INSERT INTO hive.task_contracts (
+                    task_id,
+                    contract_version,
+                    allowed_paths,
+                    forbidden_paths,
+                    dependencies,
+                    required_tests,
+                    review_policy,
+                    handoff_template,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, now())
+                ON CONFLICT (task_id) DO UPDATE
+                SET
+                    contract_version = EXCLUDED.contract_version,
+                    allowed_paths = EXCLUDED.allowed_paths,
+                    forbidden_paths = EXCLUDED.forbidden_paths,
+                    dependencies = EXCLUDED.dependencies,
+                    required_tests = EXCLUDED.required_tests,
+                    review_policy = EXCLUDED.review_policy,
+                    handoff_template = EXCLUDED.handoff_template,
+                    updated_at = now()
+                """,
+                (
+                    task_id,
+                    normalized["contract_version"],
+                    normalized["allowed_paths"],
+                    normalized["forbidden_paths"],
+                    normalized["dependencies"],
+                    json.dumps(normalized["required_tests"]),
+                    json.dumps(normalized["review_policy"]),
+                    normalized["handoff_template"],
+                ),
+            )
+
+            contract = await _fetch_task_contract(task_id, conn)
+            assert contract is not None
+            return contract
+
+
 async def get_current_task(assigned_to: str) -> dict[str, Any] | None:
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -177,6 +425,32 @@ async def claim_task(task_id: int, assigned_to: str) -> dict[str, Any]:
     async with pool.connection() as conn:
         async with conn.transaction():
             cursor = conn.cursor(row_factory=dict_row)
+
+            await cursor.execute(
+                """
+                SELECT status, depends_on
+                FROM hive.tasks
+                WHERE id = %s
+                """,
+                (task_id,),
+            )
+            existing = await cursor.fetchone()
+            if existing is None:
+                raise ValueError(f"Task {task_id} not found")
+            if existing["status"] != "open":
+                raise ValueError(f"Task {task_id} is not open")
+
+            contract = await _fetch_task_contract(task_id, conn)
+            if contract is None:
+                raise ValueError(
+                    f"Task {task_id} is missing required task contract"
+                )
+
+            depends_on = existing["depends_on"] or []
+            if sorted(contract["dependencies"]) != sorted(depends_on):
+                raise ValueError(
+                    f"Task {task_id} contract dependencies do not match task depends_on"
+                )
 
             # Check for unmet dependencies before allowing claim
             await cursor.execute(

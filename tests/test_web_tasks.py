@@ -54,6 +54,41 @@ async def _insert_clarification(
         return (await cursor.fetchone())[0]
 
 
+async def _insert_task_contract(
+    db_pool,
+    *,
+    task_id: int,
+    dependencies: list[int] | None = None,
+) -> None:
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO hive.task_contracts (
+                task_id,
+                contract_version,
+                allowed_paths,
+                forbidden_paths,
+                dependencies,
+                required_tests,
+                review_policy,
+                handoff_template
+            )
+            VALUES (
+                %s, 1, %s, %s, %s, %s::jsonb, %s::jsonb, %s
+            )
+            """,
+            (
+                task_id,
+                ["coordinator/**"],
+                [],
+                dependencies or [],
+                '{"red":["pytest tests/test_web_tasks.py -k claim"],"green":["pytest tests/test_web_tasks.py -k claim"]}',
+                '{"min_reviews":1,"independent_required":true}',
+                "v1_task_handoff",
+            ),
+        )
+
+
 async def test_list_tasks_empty(db_pool, client):
     resp = await client.get("/api/tasks")
 
@@ -192,6 +227,7 @@ async def test_patch_task_updates_fields(db_pool, client):
 
 async def test_claim_and_release_task(db_pool, client):
     task = await _create_task(client, "Claim me")
+    await _insert_task_contract(db_pool, task_id=task["id"])
 
     claim_resp = await client.post(
         f"/api/tasks/{task['id']}/claim",
@@ -231,6 +267,7 @@ async def test_get_task_not_found_returns_404_error(db_pool, client):
 
 async def test_claim_task_invalid_state_returns_409_error(db_pool, client):
     task = await _create_task(client, "Already in progress")
+    await _insert_task_contract(db_pool, task_id=task["id"])
     await client.post(f"/api/tasks/{task['id']}/claim", json={"assigned_to": "codex1"})
 
     resp = await client.post(
@@ -240,6 +277,18 @@ async def test_claim_task_invalid_state_returns_409_error(db_pool, client):
 
     assert resp.status_code == 409
     assert "not open" in resp.json()["error"]
+
+
+async def test_claim_task_missing_contract_returns_409_error(db_pool, client):
+    task = await _create_task(client, "Missing contract")
+
+    resp = await client.post(
+        f"/api/tasks/{task['id']}/claim",
+        json={"assigned_to": "codex1"},
+    )
+
+    assert resp.status_code == 409
+    assert "missing required task contract" in resp.json()["error"]
 
 
 async def test_invalid_task_status_returns_422_error(db_pool, client):

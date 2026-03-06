@@ -20,8 +20,9 @@ async def lifespan(server):
 
 mcp = FastMCP("hive", lifespan=lifespan)
 
-# Task tools (8)
+# Task tools
 mcp.tool()(tasks.get_task)
+mcp.tool()(tasks.get_task_contract)
 mcp.tool()(tasks.get_current_task)
 mcp.tool()(tasks.get_next_task)
 mcp.tool()(tasks.claim_task)
@@ -29,6 +30,7 @@ mcp.tool()(tasks.release_task)
 mcp.tool()(tasks.list_tasks)
 mcp.tool()(tasks.update_task)
 mcp.tool()(tasks.create_task)
+mcp.tool()(tasks.set_task_contract)
 
 # Note tools (1)
 mcp.tool()(notes.add_note)
