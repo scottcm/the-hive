@@ -1226,6 +1226,82 @@ async def test_update_task_done_accepts_mixed_reviews_with_one_independent(db_po
     assert task["status"] == "done"
 
 
+async def test_update_task_done_allows_self_review_when_independence_not_required(
+    db_pool,
+):
+    task_id = await insert_task(
+        db_pool, title="Self review allowed by policy", status="in_progress"
+    )
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["pytest tests/test_mcp_tasks.py -k independent-false -v"],
+        green_tests=["pytest tests/test_mcp_tasks.py -k independent-false -v"],
+        min_reviews=1,
+        independent_required=False,
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="6" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={
+            "failing_tests": ["tests/test_mcp_tasks.py::test_independent_required_false"]
+        },
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="7" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="8" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={
+            "command": "pytest tests/test_mcp_tasks.py -k independent-false -v",
+            "passed": True,
+        },
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="9" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="codex",
+        metadata={"author": "codex", "reviewer": "codex"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="a" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="codex",
+        metadata={
+            "what_changed": "Adjusted review policy behavior.",
+            "why_changed": "Independent review is disabled for this contract.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Re-enable independent review policy when needed"],
+        },
+    )
+
+    task = await tasks.update_task(task_id=task_id, status="done")
+    events = await fetch_gate_events(db_pool, task_id)
+
+    assert task["status"] == "done"
+    assert ("G4_review_separation", "pass") in events
+
+
 async def test_update_task_in_progress_requires_contract(db_pool):
     task_id = await insert_task(db_pool, title="Start without contract", status="open")
 
