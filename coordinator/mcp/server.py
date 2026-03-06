@@ -1,4 +1,6 @@
+import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
@@ -46,6 +48,16 @@ mcp.tool()(clarifications.create_clarification)
 mcp.tool()(clarifications.answer_clarification)
 mcp.tool()(clarifications.list_clarifications)
 
+
+def _ensure_compatible_event_loop_policy() -> None:
+    if (
+        sys.platform.startswith("win")
+        and hasattr(asyncio, "WindowsSelectorEventLoopPolicy")
+    ):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 if __name__ == "__main__":
     transport = os.getenv("HIVE_TRANSPORT", "stdio")
+    _ensure_compatible_event_loop_policy()
     mcp.run(transport=transport)
