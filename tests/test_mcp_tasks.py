@@ -331,7 +331,7 @@ async def test_get_current_task_includes_pending_clarifications(db_pool):
 async def test_get_next_task_prefers_assigned(db_pool):
     high_priority_milestone = await insert_milestone(db_pool, name="Urgent", priority=10)
     lower_priority_milestone = await insert_milestone(db_pool, name="Assigned", priority=1)
-    await insert_task(
+    unassigned_task_id = await insert_task(
         db_pool,
         title="Unassigned urgent",
         milestone_id=high_priority_milestone,
@@ -347,6 +347,8 @@ async def test_get_next_task_prefers_assigned(db_pool):
         assigned_to="codex",
         sequence_order=5,
     )
+    await insert_task_contract(db_pool, task_id=unassigned_task_id, dependencies=[])
+    await insert_task_contract(db_pool, task_id=assigned_task_id, dependencies=[])
 
     task = await tasks.get_next_task("codex")
 
@@ -364,6 +366,7 @@ async def test_get_next_task_falls_back_unassigned(db_pool):
         status="open",
         assigned_to=None,
     )
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[])
 
     task = await tasks.get_next_task("codex")
 
@@ -617,9 +620,11 @@ async def test_create_task_with_depends_on(db_pool):
 
 async def test_get_next_task_skips_unmet_deps(db_pool):
     dep_id = await insert_task(db_pool, title="Dependency", status="open")
-    await insert_task(
+    blocked_id = await insert_task(
         db_pool, title="Blocked by dep", status="open", depends_on=[dep_id]
     )
+    await insert_task_contract(db_pool, task_id=dep_id, dependencies=[])
+    await insert_task_contract(db_pool, task_id=blocked_id, dependencies=[dep_id])
 
     # The only open task without unmet deps is the dependency itself
     task = await tasks.get_next_task("codex")
@@ -632,6 +637,7 @@ async def test_get_next_task_returns_task_when_deps_met(db_pool):
     dependent_id = await insert_task(
         db_pool, title="Ready to go", status="open", depends_on=[dep_id]
     )
+    await insert_task_contract(db_pool, task_id=dependent_id, dependencies=[dep_id])
 
     task = await tasks.get_next_task("codex")
     assert task is not None
@@ -643,6 +649,7 @@ async def test_get_next_task_cancelled_dep_counts_as_met(db_pool):
     dependent_id = await insert_task(
         db_pool, title="Unblocked", status="open", depends_on=[dep_id]
     )
+    await insert_task_contract(db_pool, task_id=dependent_id, dependencies=[dep_id])
 
     task = await tasks.get_next_task("codex")
     assert task is not None
@@ -652,17 +659,44 @@ async def test_get_next_task_cancelled_dep_counts_as_met(db_pool):
 async def test_get_next_task_multiple_deps_all_must_be_met(db_pool):
     dep1_id = await insert_task(db_pool, title="Done dep", status="done")
     dep2_id = await insert_task(db_pool, title="Open dep", status="open")
-    await insert_task(
+    dependent_id = await insert_task(
         db_pool,
         title="Needs both",
         status="open",
         depends_on=[dep1_id, dep2_id],
+    )
+    await insert_task_contract(db_pool, task_id=dep2_id, dependencies=[])
+    await insert_task_contract(
+        db_pool,
+        task_id=dependent_id,
+        dependencies=[dep1_id, dep2_id],
     )
 
     # Only dep2 should be returned (dep1 is done, dependent is blocked)
     task = await tasks.get_next_task("codex")
     assert task is not None
     assert task["id"] == dep2_id
+
+
+async def test_get_next_task_skips_open_tasks_missing_contract(db_pool):
+    missing_contract_id = await insert_task(
+        db_pool,
+        title="No contract",
+        status="open",
+        sequence_order=0,
+    )
+    claimable_id = await insert_task(
+        db_pool,
+        title="Has contract",
+        status="open",
+        sequence_order=1,
+    )
+    await insert_task_contract(db_pool, task_id=claimable_id, dependencies=[])
+
+    task = await tasks.get_next_task("codex")
+    assert task is not None
+    assert task["id"] == claimable_id
+    assert task["id"] != missing_contract_id
 
 
 async def test_claim_task_with_unmet_deps_fails(db_pool):
@@ -845,6 +879,27 @@ async def test_set_task_contract_round_trip(db_pool):
         "pytest tests/test_mcp_tasks.py -k contract"
     ]
     assert fetched == contract
+
+
+async def test_set_task_contract_defaults_dependencies_to_task_depends_on(db_pool):
+    dep_id = await insert_task(db_pool, title="Dependency", status="done")
+    task_id = await insert_task(
+        db_pool,
+        title="Contract inherits deps",
+        status="open",
+        depends_on=[dep_id],
+    )
+
+    contract = await tasks.set_task_contract(
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+    )
+
+    assert contract["dependencies"] == [dep_id]
+
+    task = await tasks.claim_task(task_id, "codex")
+    assert task["id"] == task_id
+    assert task["status"] == "in_progress"
 
 
 async def test_set_task_contract_rejects_invalid_payload(db_pool):

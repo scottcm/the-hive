@@ -299,35 +299,44 @@ async def set_task_contract(
     handoff_template: str = "v1_task_handoff",
     contract_version: int = 1,
 ) -> dict[str, Any]:
-    normalized = _normalize_task_contract_payload(
-        allowed_paths=allowed_paths,
-        forbidden_paths=forbidden_paths or [],
-        dependencies=dependencies or [],
-        required_tests=required_tests
-        or {
-            "red": ["pytest tests/ -k <task_red>"],
-            "green": ["pytest tests/ -v"],
-        },
-        review_policy=review_policy
-        or {
-            "min_reviews": 1,
-            "independent_required": True,
-        },
-        handoff_template=handoff_template,
-        contract_version=contract_version,
-    )
-
     pool = await get_pool()
     async with pool.connection() as conn:
         async with conn.transaction():
             cursor = conn.cursor(row_factory=dict_row)
             await cursor.execute(
-                "SELECT id FROM hive.tasks WHERE id = %s",
+                "SELECT id, depends_on FROM hive.tasks WHERE id = %s",
                 (task_id,),
             )
             task_row = await cursor.fetchone()
             if task_row is None:
                 raise ValueError(f"Task {task_id} not found")
+
+            task_dependencies = task_row["depends_on"] or []
+            effective_dependencies = (
+                dependencies if dependencies is not None else task_dependencies
+            )
+            if sorted(effective_dependencies) != sorted(task_dependencies):
+                raise ValueError(
+                    "Task contract dependencies must match task depends_on"
+                )
+
+            normalized = _normalize_task_contract_payload(
+                allowed_paths=allowed_paths,
+                forbidden_paths=forbidden_paths or [],
+                dependencies=effective_dependencies,
+                required_tests=required_tests
+                or {
+                    "red": ["pytest tests/ -k <task_red>"],
+                    "green": ["pytest tests/ -v"],
+                },
+                review_policy=review_policy
+                or {
+                    "min_reviews": 1,
+                    "independent_required": True,
+                },
+                handoff_template=handoff_template,
+                contract_version=contract_version,
+            )
 
             await cursor.execute(
                 """
@@ -405,6 +414,24 @@ async def get_next_task(assigned_to: str) -> dict[str, Any] | None:
             WHERE t.status = 'open'
               AND (t.assigned_to = %s OR t.assigned_to IS NULL)
               AND {DEPS_MET_CONDITION}
+              AND EXISTS (
+                    SELECT 1
+                    FROM hive.task_contracts tc
+                    WHERE tc.task_id = t.id
+                      AND COALESCE(
+                            (
+                                SELECT array_agg(dep ORDER BY dep)
+                                FROM unnest(tc.dependencies) AS dep
+                            ),
+                            '{{}}'::int[]
+                        ) = COALESCE(
+                            (
+                                SELECT array_agg(dep ORDER BY dep)
+                                FROM unnest(t.depends_on) AS dep
+                            ),
+                            '{{}}'::int[]
+                        )
+                )
             ORDER BY
                 CASE WHEN t.assigned_to = %s THEN 0 ELSE 1 END,
                 m.priority DESC NULLS LAST,
