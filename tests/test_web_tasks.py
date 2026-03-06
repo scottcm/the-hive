@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -89,6 +91,41 @@ async def _insert_task_contract(
         )
 
 
+async def _insert_task_evidence(
+    db_pool,
+    *,
+    task_id: int,
+    artifact_type: str,
+    artifact_hash_sha256: str,
+    captured_by: str,
+    metadata: dict,
+) -> None:
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO hive.task_evidence_artifacts (
+                task_id,
+                artifact_type,
+                artifact_hash_sha256,
+                storage_ref,
+                captured_by,
+                immutable,
+                metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                task_id,
+                artifact_type,
+                artifact_hash_sha256,
+                f"file://artifacts/{artifact_type}.json",
+                captured_by,
+                True,
+                json.dumps(metadata),
+            ),
+        )
+
+
 async def test_list_tasks_empty(db_pool, client):
     resp = await client.get("/api/tasks")
 
@@ -155,6 +192,57 @@ async def test_list_tasks_filters(db_pool, client):
         },
     )
     done_task_id = done_task_resp.json()["id"]
+    await _insert_task_contract(db_pool, task_id=done_task_id)
+    await _insert_task_evidence(
+        db_pool,
+        task_id=done_task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="1" * 64,
+        captured_by="codex1",
+        metadata={"failing_tests": ["tests/test_web_tasks.py::test_list_tasks_filters"]},
+    )
+    await _insert_task_evidence(
+        db_pool,
+        task_id=done_task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="2" * 64,
+        captured_by="codex1",
+        metadata={"changed_files": ["coordinator/web/routes/tasks.py"]},
+    )
+    await _insert_task_evidence(
+        db_pool,
+        task_id=done_task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="3" * 64,
+        captured_by="codex1",
+        metadata={
+            "command": "pytest tests/test_web_tasks.py -k claim",
+            "passed": True,
+        },
+    )
+    await _insert_task_evidence(
+        db_pool,
+        task_id=done_task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="4" * 64,
+        captured_by="claude",
+        metadata={"author": "codex1", "reviewer": "claude"},
+    )
+    await _insert_task_evidence(
+        db_pool,
+        task_id=done_task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="5" * 64,
+        captured_by="codex1",
+        metadata={
+            "what_changed": "Updated task route.",
+            "why_changed": "Need filter coverage.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green_run.json"],
+            "next_actions": ["Run companion review"],
+        },
+    )
     await client.patch(
         f"/api/tasks/{done_task_id}",
         json={"status": "done", "assigned_to": "codex1"},

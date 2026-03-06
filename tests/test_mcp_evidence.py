@@ -177,6 +177,15 @@ async def test_record_evidence_for_done_task_anchors_retention_to_done_time(db_p
 async def test_marking_task_done_refreshes_existing_evidence_retention_floor(db_pool):
     task_id = await insert_task(db_pool, title="Open task")
     captured_at = datetime(2026, 3, 6, 12, 0, tzinfo=timezone.utc)
+    await tasks.set_task_contract(
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        required_tests={
+            "red": ["pytest tests/test_mcp_evidence.py -k retention -v"],
+            "green": ["pytest tests/ -v"],
+        },
+        review_policy={"min_reviews": 1, "independent_required": True},
+    )
 
     artifact = await evidence.record_task_evidence(
         task_id=task_id,
@@ -185,6 +194,50 @@ async def test_marking_task_done_refreshes_existing_evidence_retention_floor(db_
         storage_ref="file://artifacts/red.log",
         captured_by="codex",
         captured_at=captured_at.isoformat(),
+        metadata={
+            "failing_tests": [
+                "tests/test_mcp_evidence.py::test_marking_task_done_refreshes_existing_evidence_retention_floor"
+            ]
+        },
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="7" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/evidence.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="6" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={"command": "pytest tests/ -v", "passed": True},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="5" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="4" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="codex",
+        metadata={
+            "what_changed": "Updated evidence retention behavior.",
+            "why_changed": "Ensure done-transition retention floor.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run companion review"],
+        },
     )
 
     await tasks.update_task(task_id=task_id, status="done")

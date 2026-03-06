@@ -1,6 +1,6 @@
 import pytest
 
-from coordinator.mcp.tools import tasks
+from coordinator.mcp.tools import evidence, tasks
 
 
 async def insert_milestone(
@@ -192,6 +192,20 @@ async def fetch_task_row(db_pool, task_id: int) -> tuple:
         row = await cursor.fetchone()
         assert row is not None
         return row
+
+
+async def fetch_gate_events(db_pool, task_id: int) -> list[tuple]:
+    async with db_pool.connection() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT gate_name, decision
+            FROM hive.task_gate_events
+            WHERE task_id = %s
+            ORDER BY id
+            """,
+            (task_id,),
+        )
+        return await cursor.fetchall()
 
 
 async def test_get_current_task_in_progress(db_pool):
@@ -912,3 +926,187 @@ async def test_set_task_contract_rejects_invalid_payload(db_pool):
             required_tests={"red": ["pytest tests/ -k red"], "green": []},
             review_policy={"min_reviews": 1, "independent_required": True},
         )
+
+
+async def test_update_task_done_requires_handoff_gate(db_pool):
+    task_id = await insert_task(db_pool, title="Gate target", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["uv run pytest tests/test_mcp_tasks.py -k gate -v"],
+        green_tests=["uv run pytest tests/test_mcp_tasks.py -k gate -v"],
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="1" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_gate"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="2" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="3" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={
+            "command": "uv run pytest tests/test_mcp_tasks.py -k gate -v",
+            "passed": True,
+        },
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="4" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+
+    with pytest.raises(ValueError, match="G5"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_done_records_gate_passes(db_pool):
+    task_id = await insert_task(db_pool, title="Gate pass", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+        red_tests=["uv run pytest tests/test_mcp_tasks.py -k gate-pass -v"],
+        green_tests=["uv run pytest tests/test_mcp_tasks.py -k gate-pass -v"],
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="5" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_gate_pass"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="6" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="7" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={
+            "command": "uv run pytest tests/test_mcp_tasks.py -k gate-pass -v",
+            "passed": True,
+        },
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="8" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="claude",
+        metadata={"author": "codex", "reviewer": "claude"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="9" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="codex",
+        metadata={
+            "what_changed": "Implemented gate engine.",
+            "why_changed": "Enforce reliability policy.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run independent review"],
+        },
+    )
+
+    task = await tasks.update_task(task_id=task_id, status="done")
+    events = await fetch_gate_events(db_pool, task_id)
+
+    assert task["status"] == "done"
+    assert events == [
+        ("G1_scope_lock", "pass"),
+        ("G2_tdd_order", "pass"),
+        ("G3_verification", "pass"),
+        ("G4_review_separation", "pass"),
+        ("G5_handoff_completeness", "pass"),
+    ]
+
+
+async def test_update_task_done_rejects_self_review(db_pool):
+    task_id = await insert_task(db_pool, title="Self review", status="in_progress")
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        allowed_paths=["coordinator/**"],
+        dependencies=[],
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="red_run",
+        artifact_hash_sha256="a" * 64,
+        storage_ref="file://artifacts/red.log",
+        captured_by="codex",
+        metadata={"failing_tests": ["tests/test_mcp_tasks.py::test_self_review"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="implementation_commit",
+        artifact_hash_sha256="b" * 64,
+        storage_ref="file://artifacts/commit.json",
+        captured_by="codex",
+        metadata={"changed_files": ["coordinator/mcp/tools/tasks.py"]},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="green_run",
+        artifact_hash_sha256="c" * 64,
+        storage_ref="file://artifacts/green.log",
+        captured_by="codex",
+        metadata={"command": "pytest tests/ -v", "passed": True},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="review_output",
+        artifact_hash_sha256="d" * 64,
+        storage_ref="file://artifacts/review.md",
+        captured_by="codex",
+        metadata={"author": "codex", "reviewer": "codex"},
+    )
+    await evidence.record_task_evidence(
+        task_id=task_id,
+        artifact_type="handoff_packet",
+        artifact_hash_sha256="e" * 64,
+        storage_ref="file://artifacts/handoff.json",
+        captured_by="codex",
+        metadata={
+            "what_changed": "Implemented gate engine.",
+            "why_changed": "Enforce reliability policy.",
+            "residual_risks": [],
+            "unresolved_questions": [],
+            "verification_links": ["file://artifacts/green.log"],
+            "next_actions": ["Run independent review"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="G4"):
+        await tasks.update_task(task_id=task_id, status="done")

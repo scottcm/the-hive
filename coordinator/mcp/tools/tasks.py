@@ -1,3 +1,4 @@
+import fnmatch
 import json
 from typing import Any
 
@@ -33,6 +34,14 @@ DEPS_MET_CONDITION = """
         WHERE dt.status NOT IN ('done', 'cancelled')
     )
 """
+
+DONE_GATE_SEQUENCE = (
+    "G1_scope_lock",
+    "G2_tdd_order",
+    "G3_verification",
+    "G4_review_separation",
+    "G5_handoff_completeness",
+)
 
 
 def _validate_path_list(
@@ -189,6 +198,230 @@ async def _fetch_task_contract(
     if row is None:
         return None
     return _serialize_task_contract(row)
+
+
+def _normalize_metadata(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        return {}
+    return value
+
+
+async def _fetch_task_evidence(task_id: int, conn: Any) -> dict[str, list[dict[str, Any]]]:
+    cursor = conn.cursor(row_factory=dict_row)
+    await cursor.execute(
+        """
+        SELECT artifact_type, captured_at, metadata
+        FROM hive.task_evidence_artifacts
+        WHERE task_id = %s
+        ORDER BY captured_at, id
+        """,
+        (task_id,),
+    )
+    rows = await cursor.fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row["artifact_type"], []).append(
+            {
+                "captured_at": row["captured_at"],
+                "metadata": _normalize_metadata(row["metadata"]),
+            }
+        )
+    return grouped
+
+
+def _evaluate_scope_lock_gate(
+    contract: dict[str, Any],
+    evidence: dict[str, list[dict[str, Any]]],
+) -> tuple[str, str]:
+    implementation_rows = evidence.get("implementation_commit", [])
+    if not implementation_rows:
+        return ("fail", "No implementation_commit evidence artifact found")
+
+    changed_files: list[str] = []
+    for row in implementation_rows:
+        values = row["metadata"].get("changed_files")
+        if isinstance(values, list):
+            changed_files.extend(
+                path.strip().replace("\\", "/")
+                for path in values
+                if isinstance(path, str) and path.strip() != ""
+            )
+    if not changed_files:
+        return ("fail", "No changed_files metadata recorded for implementation commits")
+
+    allowed_paths: list[str] = contract["allowed_paths"]
+    forbidden_paths: list[str] = contract["forbidden_paths"]
+
+    for path in changed_files:
+        if any(fnmatch.fnmatch(path, pattern) for pattern in forbidden_paths):
+            return ("fail", f"Out-of-scope forbidden path detected: {path}")
+        if not any(fnmatch.fnmatch(path, pattern) for pattern in allowed_paths):
+            return ("fail", f"Path not in allowed scope: {path}")
+    return ("pass", "All implementation changed files are within contract scope")
+
+
+def _evaluate_tdd_order_gate(
+    evidence: dict[str, list[dict[str, Any]]],
+) -> tuple[str, str]:
+    red_rows = evidence.get("red_run", [])
+    implementation_rows = evidence.get("implementation_commit", [])
+    if not red_rows:
+        return ("fail", "No red_run evidence artifact found")
+    if not implementation_rows:
+        return ("fail", "No implementation_commit evidence artifact found")
+
+    has_failing_tests = any(
+        isinstance(row["metadata"].get("failing_tests"), list)
+        and len(row["metadata"]["failing_tests"]) > 0
+        for row in red_rows
+    )
+    if not has_failing_tests:
+        return ("fail", "RED evidence is missing failing_tests identifiers")
+
+    first_red = red_rows[0]["captured_at"]
+    first_implementation = implementation_rows[0]["captured_at"]
+    if first_red > first_implementation:
+        return ("fail", "RED evidence captured after first implementation commit")
+    return ("pass", "RED evidence precedes implementation and includes failing tests")
+
+
+def _evaluate_verification_gate(
+    contract: dict[str, Any],
+    evidence: dict[str, list[dict[str, Any]]],
+) -> tuple[str, str]:
+    green_rows = evidence.get("green_run", [])
+    if not green_rows:
+        return ("fail", "No green_run evidence artifact found")
+
+    passed_commands = {
+        row["metadata"].get("command")
+        for row in green_rows
+        if isinstance(row["metadata"].get("command"), str)
+        and row["metadata"].get("passed", True) is True
+    }
+    required_commands = contract["required_tests"]["green"]
+    missing = [command for command in required_commands if command not in passed_commands]
+    if missing:
+        return (
+            "fail",
+            "Missing successful green_run evidence for commands: "
+            + ", ".join(missing),
+        )
+    return ("pass", "Required verification commands have passing evidence")
+
+
+def _evaluate_review_gate(
+    contract: dict[str, Any],
+    evidence: dict[str, list[dict[str, Any]]],
+) -> tuple[str, str]:
+    review_rows = evidence.get("review_output", [])
+    if not review_rows:
+        return ("fail", "No review_output evidence artifact found")
+
+    policy = contract["review_policy"]
+    min_reviews = policy["min_reviews"]
+    independent_required = policy["independent_required"]
+
+    parsed_reviews: list[tuple[str, str]] = []
+    for row in review_rows:
+        reviewer = row["metadata"].get("reviewer")
+        author = row["metadata"].get("author")
+        if isinstance(reviewer, str) and reviewer.strip() != "" and isinstance(
+            author, str
+        ) and author.strip() != "":
+            parsed_reviews.append((reviewer.strip(), author.strip()))
+
+    if len(parsed_reviews) < min_reviews:
+        return (
+            "fail",
+            f"Review evidence count {len(parsed_reviews)} is below required {min_reviews}",
+        )
+
+    if independent_required:
+        independent_reviews = [
+            (reviewer, author)
+            for reviewer, author in parsed_reviews
+            if reviewer != author
+        ]
+        if len(independent_reviews) < min_reviews:
+            return (
+                "fail",
+                "Independent review requirement failed: reviewer must differ from author",
+            )
+    return ("pass", "Review policy requirements satisfied")
+
+
+def _evaluate_handoff_gate(
+    evidence: dict[str, list[dict[str, Any]]],
+) -> tuple[str, str]:
+    handoff_rows = evidence.get("handoff_packet", [])
+    if not handoff_rows:
+        return ("fail", "No handoff_packet evidence artifact found")
+
+    metadata = handoff_rows[-1]["metadata"]
+    required_fields = (
+        "what_changed",
+        "why_changed",
+        "residual_risks",
+        "unresolved_questions",
+        "verification_links",
+        "next_actions",
+    )
+    missing = [field for field in required_fields if field not in metadata]
+    if missing:
+        return ("fail", "Handoff packet missing fields: " + ", ".join(missing))
+    return ("pass", "Handoff packet contains required fields")
+
+
+async def _evaluate_done_gates(
+    task_id: int,
+    conn: Any,
+) -> list[tuple[str, str, str]]:
+    contract = await _fetch_task_contract(task_id, conn)
+    if contract is None:
+        return [
+            (gate_name, "fail", "Task is missing required task contract")
+            for gate_name in DONE_GATE_SEQUENCE
+        ]
+
+    evidence = await _fetch_task_evidence(task_id, conn)
+    evaluations = (
+        ("G1_scope_lock", _evaluate_scope_lock_gate(contract, evidence)),
+        ("G2_tdd_order", _evaluate_tdd_order_gate(evidence)),
+        ("G3_verification", _evaluate_verification_gate(contract, evidence)),
+        ("G4_review_separation", _evaluate_review_gate(contract, evidence)),
+        ("G5_handoff_completeness", _evaluate_handoff_gate(evidence)),
+    )
+    return [(name, decision, reason) for name, (decision, reason) in evaluations]
+
+
+async def _record_gate_event(
+    *,
+    task_id: int,
+    gate_name: str,
+    decision: str,
+    reason: str,
+    actor: str,
+    conn: Any,
+) -> None:
+    cursor = conn.cursor()
+    await cursor.execute(
+        """
+        INSERT INTO hive.task_gate_events (
+            task_id,
+            gate_name,
+            decision,
+            reason,
+            actor
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (task_id, gate_name, decision, reason, actor),
+    )
 
 
 def _serialize_summary_task(row: dict[str, Any]) -> dict[str, Any]:
@@ -611,6 +844,52 @@ async def update_task(
 
     pool = await get_pool()
     async with pool.connection() as conn:
+        cursor = conn.cursor(row_factory=dict_row)
+        await cursor.execute(
+            "SELECT id, status, assigned_to FROM hive.tasks WHERE id = %s",
+            (task_id,),
+        )
+        existing = await cursor.fetchone()
+        if existing is None:
+            raise ValueError(f"Task {task_id} not found")
+
+        actor = (
+            assigned_to.strip()
+            if isinstance(assigned_to, str) and assigned_to.strip() != ""
+            else (
+                existing["assigned_to"].strip()
+                if isinstance(existing["assigned_to"], str)
+                and existing["assigned_to"].strip() != ""
+                else "system"
+            )
+        )
+
+        if status == "done":
+            gate_results: list[tuple[str, str, str]]
+            async with conn.transaction():
+                gate_results = await _evaluate_done_gates(task_id, conn)
+                for gate_name, decision, reason in gate_results:
+                    await _record_gate_event(
+                        task_id=task_id,
+                        gate_name=gate_name,
+                        decision=decision,
+                        reason=reason,
+                        actor=actor,
+                        conn=conn,
+                    )
+
+            failures = [
+                f"{gate_name}: {reason}"
+                for gate_name, decision, reason in gate_results
+                if decision == "fail"
+            ]
+            if failures:
+                raise ValueError(
+                    "Task "
+                    f"{task_id} failed gate checks: "
+                    + "; ".join(failures)
+                )
+
         async with conn.transaction():
             cursor = conn.cursor(row_factory=dict_row)
             await cursor.execute(
@@ -623,8 +902,7 @@ async def update_task(
                 params,
             )
             row = await cursor.fetchone()
-            if row is None:
-                raise ValueError(f"Task {task_id} not found")
+            assert row is not None
             if row["status"] == "done":
                 await cursor.execute(
                     """
