@@ -22,9 +22,10 @@
     title: string;
     description: string;
     status: string;
-    assignee: string | null;
+    assigned_to: string | null;
     tags: string[];
     sequence_order: number;
+    github_issues: number[];
   }
 
   let projects: Project[] = $state([]);
@@ -40,68 +41,81 @@
 
   let collapsedMilestones: Set<number> = $state(new Set());
 
-  async function fetchData(url: string) {
+  async function fetchData<T>(url: string): Promise<T> {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Failed to fetch ${url}`);
-    return res.json();
+    return (await res.json()) as T;
   }
 
-  async function loadProjects() {
-    const data = await fetchData('/api/projects');
+  async function loadProjects(): Promise<void> {
+    const data = await fetchData<Project[]>('/api/projects');
     projects = data;
     if (projects.length > 0 && selectedProjectId === null) {
       selectedProjectId = projects[0].id;
     }
   }
 
-  async function loadClarificationsCount() {
-    const data = await fetchData('/api/clarifications/pending-count');
+  async function loadClarificationsCount(): Promise<void> {
+    const data = await fetchData<{ count: number }>('/api/clarifications/pending-count');
     pendingClarificationsCount = data.count;
   }
 
-  async function loadBoardData() {
-    if (!selectedProjectId) return;
-    const [ms, ts] = await Promise.all([
-      fetchData(`/api/milestones?project_id=${selectedProjectId}`),
-      fetchData(`/api/tasks?project_id=${selectedProjectId}`)
-    ]);
-    milestones = ms;
-    tasks = ts;
+  async function loadBoardData(projectId: number): Promise<void> {
+    const ms = await fetchData<Milestone[]>(`/api/milestones?project_id=${projectId}`);
+    const taskResponses = await Promise.all(
+      ms.map((milestone) => fetchData<Task[]>(`/api/tasks?milestone_id=${milestone.id}`))
+    );
+    const loadedTasks = taskResponses
+      .flat()
+      .sort((a, b) => a.sequence_order - b.sequence_order || a.id - b.id);
 
-    // Default collapse completed milestones
-    milestones.forEach(m => {
-        if (m.status === 'done') {
-            collapsedMilestones.add(m.id);
-        }
-    });
+    // Prevent stale updates if the project selection changes mid-fetch.
+    if (selectedProjectId !== projectId) {
+      return;
+    }
+
+    milestones = ms;
+    tasks = loadedTasks;
+    collapsedMilestones = new Set(
+      milestones.filter((milestone) => milestone.status === 'done').map((milestone) => milestone.id)
+    );
   }
 
   onMount(() => {
-    loadProjects();
-    loadClarificationsCount();
+    void loadProjects();
+    void loadClarificationsCount();
   });
 
   $effect(() => {
-    if (selectedProjectId) {
-      loadBoardData();
+    if (selectedProjectId !== null) {
+      void loadBoardData(selectedProjectId);
     }
   });
 
   function toggleMilestone(id: number) {
-    if (collapsedMilestones.has(id)) {
-      collapsedMilestones.delete(id);
+    const next = new Set(collapsedMilestones);
+    if (next.has(id)) {
+      next.delete(id);
     } else {
-      collapsedMilestones.add(id);
+      next.add(id);
     }
+    collapsedMilestones = next;
   }
 
   let filteredTasks = $derived(tasks.filter(t => {
-    if (filters.status !== 'All' && t.status !== filters.status.toLowerCase().replace(' ', '_')) return false;
+    const statusMap: Record<string, string> = {
+      Open: 'open',
+      'In Progress': 'in_progress',
+      Blocked: 'blocked',
+      Done: 'done'
+    };
+
+    if (filters.status !== 'All' && t.status !== statusMap[filters.status]) return false;
     if (filters.assignee !== 'All') {
-        if (filters.assignee === 'Unassigned' && t.assignee !== null) return false;
-        if (filters.assignee !== 'Unassigned' && t.assignee !== filters.assignee.toLowerCase()) return false;
+        if (filters.assignee === 'Unassigned' && t.assigned_to !== null) return false;
+        if (filters.assignee !== 'Unassigned' && t.assigned_to !== filters.assignee) return false;
     }
-    if (filters.tag !== 'All' && !t.tags.includes(filters.tag.toLowerCase())) return false;
+    if (filters.tag !== 'All' && !t.tags.includes(filters.tag)) return false;
     return true;
   }));
 
@@ -110,7 +124,9 @@
   }
 
   const allTags = $derived([...new Set(tasks.flatMap(t => t.tags))]);
-  const allAssignees = $derived([...new Set(tasks.map(t => t.assignee).filter(Boolean))]);
+  const allAssignees = $derived(
+    [...new Set(tasks.map((t) => t.assigned_to).filter((assignee): assignee is string => Boolean(assignee)))]
+  );
 
 </script>
 
@@ -124,6 +140,7 @@
     </select>
   </div>
   <div class="header-actions">
+    <button class="btn">+ Project</button>
     <button class="btn">+ Milestone</button>
     <button class="btn btn-primary">+ Task</button>
   </div>
@@ -174,7 +191,13 @@
 <div class="board">
   {#each milestones as milestone}
     <div class="milestone" class:milestone-done={milestone.status === 'done'}>
-      <div class="milestone-header" onclick={() => toggleMilestone(milestone.id)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && toggleMilestone(milestone.id)}>
+      <div
+        class="milestone-header"
+        onclick={() => toggleMilestone(milestone.id)}
+        role="button"
+        tabindex="0"
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleMilestone(milestone.id)}
+      >
         <span class="milestone-toggle" class:collapsed={collapsedMilestones.has(milestone.id)}>&#x25BC;</span>
         <span class="milestone-name">{milestone.name}</span>
         <span class="milestone-desc">{milestone.description}</span>
@@ -187,15 +210,26 @@
         {#each getTasksByMilestone(milestone.id) as task}
           <div class="task-card">
             <span class="task-id">#{task.id}</span>
-            <span class="task-title">{task.title}
+            <span class="task-title">
+              <a class="task-detail-link" href={`/tasks/${task.id}`}>{task.title}</a>
               {#each task.tags as tag}
                 <span class="tag {tag}">{tag}</span>
               {/each}
+              {#each task.github_issues as issue}
+                <a
+                  class="gh-link"
+                  href={`https://github.com/scottcm/the-hive/issues/${issue}`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  #{issue} &#x2197;
+                </a>
+              {/each}
             </span>
             <span class="status status-{task.status}">{task.status.replace('_', ' ')}</span>
-            <span class="assignee" class:unassigned={!task.assignee}>
-              {#if task.assignee}
-                <span class="assignee-dot {task.assignee}"></span> {task.assignee}
+            <span class="assignee" class:unassigned={!task.assigned_to}>
+              {#if task.assigned_to}
+                <span class="assignee-dot {task.assigned_to}"></span> {task.assigned_to}
               {:else}
                 unassigned
               {/if}
@@ -257,9 +291,14 @@
   .task-card:hover { border-color: #388bfd; }
   .task-id { font-size: 12px; color: #8b949e; font-family: monospace; }
   .task-title { font-size: 14px; color: #e1e4e8; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .task-detail-link { color: inherit; text-decoration: none; }
+  .task-detail-link:hover { text-decoration: underline; }
+  .gh-link { color: #388bfd; font-size: 12px; text-decoration: none; }
+  .gh-link:hover { text-decoration: underline; }
 
   .tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #1a2d4a; color: #58a6ff; font-weight: 500; text-transform: lowercase; }
   .tag.orchestrator { background: #2a1d0e; color: #f0883e; }
+  .tag.mcp { background: #2a2a1a; color: #d2a8ff; }
   .tag.dashboard { background: #1a3a2a; color: #3fb950; }
 
   .status { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 12px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -269,7 +308,10 @@
   .status-done { background: #1a1a2e; color: #8b949e; }
 
   .assignee { font-size: 12px; color: #c9d1d9; display: flex; align-items: center; gap: 4px; }
-  .assignee-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .assignee-dot { width: 8px; height: 8px; border-radius: 50%; background: #58a6ff; }
+  .assignee-dot.claude { background: #a371f7; }
+  .assignee-dot.codex { background: #3fb950; }
+  .assignee-dot.gemini { background: #388bfd; }
   .assignee-dot.scott { background: #f0883e; }
   .unassigned { color: #6e7681; font-style: italic; }
 
