@@ -24,7 +24,7 @@ Clean migration is preferred over compatibility shims.
 - Task contracts (`allowed_paths`, `forbidden_paths`, `dependencies`, `red_tests`, `green_tests`, `review_policy`, `handoff_template`)
 - Evidence artifacts (immutable, SHA-256 referenced)
 - Override system with actor, reason, expiry
-- State machine: `open -> in_progress -> done | cancelled | blocked`
+- State machine: `open -> in_progress -> done | cancelled | blocked` (replaced by section 7.4a)
 - Dependency-aware claiming and `get_next_task`
 - Clarification system (create, answer, auto-block/unblock)
 - Projects -> Milestones -> Tasks hierarchy
@@ -179,6 +179,11 @@ Routing and policy fields:
 - `excluded_agents` (write-restricted; see below)
 - `preferred_agent` (write-restricted; see below)
 - `task_type` (`implementation | review_judgment | review_coverage | review_reconciliation | misc`)
+  - `review_judgment` and `review_coverage` are **code reviews**, not self-audits.
+    The reviewer examines the parent task's implementation diff and artifacts as
+    an independent critic. The `task_spec` for review tasks must reference the
+    parent's branch/commit and frame the work as a code review, not a checklist
+    the implementing agent runs against its own output.
 - `parent_task_id` (nullable; links review/reconciliation tasks to parent implementation)
 - `execution_policy` (JSON schema validated, task-level override)
 
@@ -191,6 +196,54 @@ excluding competitors.
 v1 security note: because v1 is default-open and unauthenticated, this is a
 cooperative policy control, not a hard security boundary. v2 auth/RBAC will
 enforce these ownership checks against authenticated principals.
+
+### 7.4a Task State Machine
+
+v0.9 state machine: `open -> in_progress -> done | cancelled | blocked`.
+v1.0 replaces this with a fully defined transition table. Statuses are
+`open | in_progress | blocked | done | superseded`. Claim fields
+(`claim_token`, `claim_session_id`, `heartbeat_deadline`) are set or cleared
+atomically as a group; the `tasks_claim_state_check` constraint (section 8.6)
+enforces this.
+
+Valid transitions:
+
+| From | To | Trigger | Claim fields |
+| --- | --- | --- | --- |
+| `open` | `in_progress` | `claim_task` | Set (all three) |
+| `open` | `blocked` | auto-block (dependency fail, clarification on unclaimed task) | Stay NULL |
+| `open` | `superseded` | `supersede_task` | Stay NULL |
+| `in_progress` | `done` | `update_task(status=done)` — G0-G5 must pass | Clear (all three) |
+| `in_progress` | `blocked` | clarification raised or dependency blocked while claimed | Keep (all three) |
+| `in_progress` | `open` | `release_task`, heartbeat expiry, or review `changes_requested` | Clear (all three) |
+| `in_progress` | `superseded` | `supersede_task` | Clear (all three) |
+| `blocked` (claimed) | `in_progress` | auto-unblock (clarification answered, dependency resolved) | Keep (all three) |
+| `blocked` (claimed) | `open` | `release_task` or heartbeat expiry while blocked | Clear (all three) |
+| `blocked` (claimed) | `superseded` | `supersede_task` | Clear (all three) |
+| `blocked` (unclaimed) | `open` | auto-unblock | Stay NULL |
+| `blocked` (unclaimed) | `superseded` | `supersede_task` | Stay NULL |
+| `done` | `open` | `reopen_task` | Stay NULL |
+| `superseded` | `open` | `reopen_task` | Stay NULL |
+
+Invalid transitions (rejected by application logic):
+
+- `open` -> `done` (must claim first; gates require evidence from a claimed session)
+- `done` -> `in_progress` / `blocked` (must reopen to `open` first)
+- `superseded` -> `in_progress` / `blocked` / `done` (must reopen to `open` first)
+
+**Claim-aware blocking.** v0.9 auto-block always sets status to `blocked` and
+auto-unblock always sets status to `open`, discarding any active claim. v1 fixes
+this: when an `in_progress` task is blocked (e.g., clarification raised by the
+claiming agent), the claim fields are preserved and the agent resumes
+(`blocked` -> `in_progress`) when unblocked. When an unclaimed `open` task is
+blocked (e.g., dependency failure), it returns to `open` on unblock. The
+`tasks_claim_state_check` constraint allows `blocked` in both claimed and
+unclaimed states to support this.
+
+**Review-specific note.** The `in_progress` -> `open` transition via
+`changes_requested` verdict uses the same mechanism as `release_task`. The
+review `task_type` does not introduce additional states; the verdict is recorded
+as evidence metadata, not as a status value.
 
 ### 7.5 Capability-Filtered Task Selection
 
@@ -223,6 +276,29 @@ For implementation work requiring dual review:
 
 Parent implementation task cannot move to `done` until required child review tasks
 and reconciliation task are `done`.
+
+**Code review, not self-audit.** v0.9 allowed agents to satisfy G4 by recording
+`review_output` evidence against their own work — effectively a self-audit
+checklist. v1 eliminates this pattern. Review child tasks are code reviews:
+the reviewer reads the parent's implementation diff, evaluates correctness and
+risk, and records findings as an independent critic. The `task_spec` for each
+review child task must include the parent's branch or commit ref so the reviewer
+can inspect the actual changes. `create_task` rejects review child tasks whose
+`task_spec` does not contain a `review_ref` field (branch name or commit SHA).
+Self-audit evidence recorded by the implementing agent is not a substitute for
+a code review by a separate reviewer.
+
+**Review verdict lifecycle.** A review task has two possible outcomes:
+
+- **Approved**: reviewer records `review_output` evidence with
+  `verdict: "approved"`. The review task moves to `done`.
+- **Changes requested**: reviewer records `review_output` evidence with
+  `verdict: "changes_requested"` and findings. The review task releases its
+  claim and returns to `open`. The implementer addresses the findings on the
+  parent task, then the review task is re-claimed for another pass. This cycle
+  repeats until the reviewer approves. The same or a different reviewer may
+  claim subsequent passes; G4 profile-level separation is re-evaluated on each
+  claim.
 
 G4 review separation is enforced at the **profile** level, not the session level.
 When evaluating G4, the engine resolves the `profile_id` for both the implementation
@@ -712,8 +788,17 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 
 1. Parent implementation task created.
 2. Required child review tasks created (`review_judgment`, `review_coverage`).
-3. Child reconciliation task merges findings and records final disposition.
-4. Parent closes only after child review/reconciliation tasks are complete.
+   Each child `task_spec` includes a `review_ref` pointing to the parent's
+   branch or commit, so the reviewer examines the actual implementation diff.
+3. Reviewer agent claims a review child task and performs a code review —
+   reading the diff, evaluating correctness, identifying risks, and recording
+   findings. This is not a self-audit; the reviewer has no prior context from
+   the implementation and approaches the code as an independent critic.
+4. If the reviewer approves, the review task moves to `done`. If the reviewer
+   requests changes, the review task returns to `open` and the implementer
+   addresses the findings. Steps 3-4 repeat until approved.
+5. Child reconciliation task merges findings and records final disposition.
+6. Parent closes only after child review/reconciliation tasks are complete.
 
 ### Clarification resolution
 
@@ -837,6 +922,26 @@ v1.0 validation extends `docs/VALIDATION_PLAN.md` with scenarios:
   - Task status `cancelled` is rejected by CHECK constraint after migration.
   - `superseded` is accepted as a terminal status.
   - G0 and dependency queries treat `superseded` as terminal.
+- **T33: Review task requires review_ref**
+  - `create_task` with `task_type` of `review_judgment` or `review_coverage` and
+    a `task_spec` missing `review_ref` is rejected.
+  - `review_ref` must be a non-empty string (branch name or commit SHA).
+- **T34: Review changes-requested cycle**
+  - Review task with `verdict: "changes_requested"` returns to `open` with claim
+    fields cleared.
+  - Review task with `verdict: "approved"` moves to `done`.
+  - Parent implementation task remains blocked by G0 while review task is `open`.
+- **T35: Claim-aware blocking**
+  - Clarification raised on `in_progress` task: status becomes `blocked`, claim
+    fields are preserved (agent keeps claim).
+  - Clarification answered: `blocked` (claimed) returns to `in_progress`, not
+    `open`. Agent resumes without re-claiming.
+  - Clarification raised on `open` (unclaimed) task: status becomes `blocked`,
+    claim fields stay NULL. Unblock returns to `open`.
+- **T36: Invalid transition rejection**
+  - `open` -> `done` is rejected (must claim first).
+  - `done` -> `in_progress` is rejected (must reopen first).
+  - `superseded` -> `done` is rejected (must reopen first).
 
 ---
 
@@ -866,7 +971,7 @@ This design is accepted when:
 1. It has one independent review with resolved major findings.
 2. Implementation tasks are created directly from sections 8-11.
 3. All schema additions have corresponding migration files.
-4. `VALIDATION_PLAN.md` is extended with T12-T32 before Phase 2 begins.
+4. `VALIDATION_PLAN.md` is extended with T12-T36 before Phase 2 begins.
 5. v1 migration + validation suite passes in a clean environment.
 6. Dual-review parent/child closure policy is enforced in automated tests.
 7. Execution policy prevents shared-workspace branch interference in automated tests.
