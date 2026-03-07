@@ -509,6 +509,32 @@ async def _record_gate_event(
     )
 
 
+async def _record_gate_event_durable(
+    *,
+    task_id: int,
+    gate_name: str,
+    decision: str,
+    reason: str,
+    actor: str,
+) -> None:
+    """Record a gate event on a separate pool connection that commits independently.
+
+    Use this when the event must survive a subsequent exception on the caller's
+    connection (e.g. fail events that are followed by a ValueError raise).
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await _record_gate_event(
+                task_id=task_id,
+                gate_name=gate_name,
+                decision=decision,
+                reason=reason,
+                actor=actor,
+                conn=conn,
+            )
+
+
 async def _evaluate_start_gate(
     task_id: int,
     conn: Any,
@@ -1154,18 +1180,40 @@ async def update_task(
             )
         )
 
+        status_transition_reason: str | None = None
         if status is not None and status != existing["status"]:
             allowed = VALID_TRANSITIONS.get(existing["status"], set())
             if status not in allowed:
-                raise ValueError(
+                invalid_reason = (
                     f"Invalid transition from '{existing['status']}' to '{status}' "
                     f"for task {task_id}"
                 )
+                await _record_gate_event_durable(
+                    task_id=task_id,
+                    gate_name="G_status_transition",
+                    decision="fail",
+                    reason=invalid_reason,
+                    actor=actor,
+                )
+                raise ValueError(invalid_reason)
+            status_transition_reason = (
+                f"Transition from '{existing['status']}' to '{status}' is allowed"
+            )
 
         start_gate_result: tuple[str, str] | None = None
         if status == "in_progress" and existing["status"] != "in_progress":
             async with conn.transaction():
-                start_gate_result = await _assert_task_can_start(task_id, conn)
+                start_decision, start_reason = await _evaluate_start_gate(task_id, conn)
+            if start_decision == "fail":
+                await _record_gate_event_durable(
+                    task_id=task_id,
+                    gate_name="G_start_dependencies",
+                    decision=start_decision,
+                    reason=start_reason,
+                    actor=actor,
+                )
+                raise ValueError(start_reason)
+            start_gate_result = (start_decision, start_reason)
 
         if status == "done":
             gate_results: list[tuple[str, str, str]]
@@ -1226,6 +1274,15 @@ async def update_task(
                     gate_name="G_start_dependencies",
                     decision=start_gate_result[0],
                     reason=start_gate_result[1],
+                    actor=actor,
+                    conn=conn,
+                )
+            if status_transition_reason is not None:
+                await _record_gate_event(
+                    task_id=task_id,
+                    gate_name="G_status_transition",
+                    decision="pass",
+                    reason=status_transition_reason,
                     actor=actor,
                     conn=conn,
                 )

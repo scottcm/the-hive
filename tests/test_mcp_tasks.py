@@ -1085,6 +1085,7 @@ async def test_update_task_done_records_gate_passes(db_pool):
         ("G3_verification", "pass"),
         ("G4_review_separation", "pass"),
         ("G5_handoff_completeness", "pass"),
+        ("G_status_transition", "pass"),
     ]
 
 
@@ -1898,6 +1899,12 @@ async def test_update_task_rejects_blocked_to_done(db_pool):
         await tasks.update_task(task_id=task_id, status="done")
 
 
+async def test_update_task_rejects_blocked_to_open(db_pool):
+    task_id = await insert_task(db_pool, title="Blocked → open invalid", status="blocked")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="open")
+
+
 async def test_update_task_allows_in_progress_to_blocked(db_pool):
     task_id = await insert_task(db_pool, title="IP → blocked valid", status="in_progress")
     task = await tasks.update_task(task_id=task_id, status="blocked")
@@ -1916,11 +1923,35 @@ async def test_update_task_allows_open_to_cancelled(db_pool):
     assert task["status"] == "cancelled"
 
 
-async def test_update_task_rejects_blocked_to_open(db_pool):
-    """Finding 2: blocked→open removed; blocked tasks must go to in_progress."""
-    task_id = await insert_task(db_pool, title="Blocked → open invalid", status="blocked")
+async def test_update_task_invalid_transition_records_gate_event(db_pool):
+    task_id = await insert_task(db_pool, title="Done transition audit", status="done")
+
     with pytest.raises(ValueError, match="transition"):
-        await tasks.update_task(task_id=task_id, status="open")
+        await tasks.update_task(task_id=task_id, status="in_progress")
+
+    events = await fetch_gate_events(db_pool, task_id)
+    assert ("G_status_transition", "fail") in events
+
+
+async def test_update_task_start_transition_fail_records_gate_event(db_pool):
+    dep_id = await insert_task(db_pool, title="Unmet dep", status="open")
+    task_id = await insert_task(
+        db_pool,
+        title="Start transition audit fail",
+        status="open",
+        depends_on=[dep_id],
+    )
+    await insert_task_contract(
+        db_pool,
+        task_id=task_id,
+        dependencies=[dep_id],
+    )
+
+    with pytest.raises(ValueError, match="unmet dependencies"):
+        await tasks.update_task(task_id=task_id, status="in_progress")
+
+    events = await fetch_gate_events(db_pool, task_id)
+    assert ("G_start_dependencies", "fail") in events
 
 
 # ---------------------------------------------------------------------------
