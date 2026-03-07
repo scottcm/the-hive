@@ -120,6 +120,35 @@ Examples:
 
 Session records include lease/heartbeat metadata for stale-claim recovery.
 
+#### 7.1a Agent Session State Machine
+
+Session statuses: `active | inactive | expired`.
+
+| From | To | Trigger | Side effects |
+| --- | --- | --- | --- |
+| `active` | `inactive` | `end_agent_session` | Auto-release all tasks claimed by this session (in_progress -> open, blocked-claimed -> blocked-unclaimed) |
+| `active` | `expired` | Recovery job: `lease_expires_at < now()` | Auto-release all tasks claimed by this session; log `session_expired` audit event |
+
+Both `inactive` and `expired` are terminal. A terminated session cannot be
+reactivated — start a new session with a new ID instead. Old session rows
+remain for audit history.
+
+In-state operations on `active` sessions:
+
+- `heartbeat_agent_session` extends `lease_expires_at` and updates
+  `last_heartbeat_at`.
+- `claim_task` requires session status = `active` and `lease_expires_at > now()`.
+- Any mutating operation with an `inactive` or `expired` session is rejected.
+
+**Profile deactivation cascade.** Setting `agent_profiles.active = false` via
+`update_agent_profile` auto-expires all `active` sessions for that profile.
+This prevents zombie sessions that are mechanically active but ineligible for
+any work.
+
+**Session uniqueness.** Session IDs are primary keys. A new session requires a
+new ID. If a session crashes and is expired by the recovery job, the agent
+starts a fresh session with a different ID (e.g., incrementing the suffix).
+
 ### 7.2 Capability Matrix and Review Roles
 
 Capabilities and role suitability are managed in a versioned config file:
@@ -160,6 +189,38 @@ Milestone additions:
 - `domain`, `owner`
 - `milestone_spec` (JSON schema validated)
 - `execution_policy` (JSON schema validated, overrides project policy)
+
+#### 7.3a Project State Machine
+
+Project statuses: `active | archived`.
+
+| From | To | Trigger | Condition |
+| --- | --- | --- | --- |
+| `active` | `archived` | `update_project(status=archived)` | All milestones are `done` or `archived` |
+| `archived` | `active` | `update_project(status=active)` | — |
+
+Archiving a project with `active` milestones is rejected. This forces
+explicit resolution of in-flight work before shelving a project.
+
+#### 7.3b Milestone State Machine
+
+Milestone statuses: `active | done | archived`.
+
+| From | To | Trigger | Condition |
+| --- | --- | --- | --- |
+| `active` | `done` | `update_milestone(status=done)` | All tasks under milestone are `done` or `superseded` |
+| `active` | `archived` | `update_milestone(status=archived)` | All tasks under milestone are `done` or `superseded` |
+| `done` | `active` | `update_milestone(status=active)` | — |
+| `done` | `archived` | `update_milestone(status=archived)` | — |
+| `archived` | `active` | `update_milestone(status=active)` | — |
+
+Invalid: `archived` -> `done` (must reactivate first).
+
+`done` means the milestone goal was achieved. `archived` means it was shelved
+or superseded. Both require all child tasks to be terminal (`done` or
+`superseded`) before the transition is accepted. Reopening (`done` -> `active`
+or `archived` -> `active`) has no preconditions — new tasks can then be created
+under the reactivated milestone.
 
 ### 7.4 Enriched Task Record and Task Types
 
@@ -330,6 +391,37 @@ Clarifications gain a routing chain and explicit target identity:
 
 `routed_to` stores the target principal/session identity. Target inbox retrieval is
 explicitly supported by clarification listing/query tools.
+
+#### 7.7a Clarification State Machine
+
+Clarification statuses: `pending | answered`.
+
+| From | To | Trigger | Side effects |
+| --- | --- | --- | --- |
+| `pending` | `answered` | `answer_clarification` | Auto-unblock task if no other `pending` clarifications remain for that task |
+
+`answered` is terminal. If the answer is insufficient, create a new
+clarification — this preserves the audit trail and avoids ambiguity about
+which answer resolves which question.
+
+**Creation constraints.** `create_clarification` is only valid when the target
+task is `open`, `in_progress`, or `blocked`. It is rejected when the task is
+`done` or `superseded` — terminal tasks cannot be blocked.
+
+**Claim-aware auto-block/unblock integration.** Clarification creation and
+resolution interact with the task state machine (section 7.4a):
+
+- Creating a clarification on an `in_progress` task transitions it to
+  `blocked` with claim fields preserved (agent keeps claim).
+- Creating a clarification on an `open` task transitions it to `blocked`
+  with claim fields staying NULL.
+- Creating a clarification on an already `blocked` task is a no-op on task
+  status (task is already blocked; the new clarification adds to the pending
+  queue).
+- Answering the last pending clarification unblocks: claimed tasks return to
+  `in_progress`, unclaimed tasks return to `open`.
+- If other pending clarifications remain after an answer, the task stays
+  `blocked`.
 
 ### 7.8 Execution Policy Hierarchy (Workspace Safety)
 
@@ -863,7 +955,7 @@ Success criteria:
 v1.0 validation extends `docs/VALIDATION_PLAN.md` with scenarios:
 
 - **T12: Agent profile/session lifecycle**
-  - Create profile, start session, heartbeat, expire session.
+  - Create profile, start session, heartbeat, end session (section 7.1a).
 - **T13: Capability-filtered selection**
   - Verify ineligible session cannot receive/claim restricted tasks.
 - **T14: Trust and gate-compliant enforcement**
@@ -942,6 +1034,40 @@ v1.0 validation extends `docs/VALIDATION_PLAN.md` with scenarios:
   - `open` -> `done` is rejected (must claim first).
   - `done` -> `in_progress` is rejected (must reopen first).
   - `superseded` -> `done` is rejected (must reopen first).
+- **T37: Session lifecycle**
+  - `end_agent_session` on active session with claimed tasks: tasks are
+    auto-released (in_progress -> open, blocked-claimed -> blocked-unclaimed),
+    session becomes `inactive`.
+  - `heartbeat_agent_session` on `inactive` or `expired` session is rejected.
+  - `claim_task` with `inactive` or `expired` session is rejected.
+  - Recovery job expires session when `lease_expires_at < now()`, releases
+    all claimed tasks, logs `session_expired` audit event.
+  - Terminal session IDs cannot be reused (`start_agent_session` with existing
+    ID fails).
+- **T38: Profile deactivation cascade**
+  - Setting `agent_profiles.active = false` auto-expires all `active` sessions
+    for that profile.
+  - Tasks claimed by those sessions are auto-released.
+- **T39: Clarification creation on terminal task**
+  - `create_clarification` on a `done` task is rejected.
+  - `create_clarification` on a `superseded` task is rejected.
+  - `create_clarification` on `open`, `in_progress`, or `blocked` task
+    succeeds.
+- **T40: Clarification multi-pending unblock**
+  - Two clarifications on same task: answering first keeps task blocked;
+    answering second unblocks task.
+  - Claimed task unblocks to `in_progress` (not `open`).
+- **T41: Milestone done with active tasks**
+  - `update_milestone(status=done)` is rejected when any task under the
+    milestone is `open`, `in_progress`, or `blocked`.
+  - Accepted when all tasks are `done` or `superseded`.
+- **T42: Project archive with active milestones**
+  - `update_project(status=archived)` is rejected when any milestone is
+    `active`.
+  - Accepted when all milestones are `done` or `archived`.
+- **T43: Milestone archived -> done rejected**
+  - `update_milestone(status=done)` from `archived` is rejected (must
+    reactivate first).
 
 ---
 
@@ -971,7 +1097,7 @@ This design is accepted when:
 1. It has one independent review with resolved major findings.
 2. Implementation tasks are created directly from sections 8-11.
 3. All schema additions have corresponding migration files.
-4. `VALIDATION_PLAN.md` is extended with T12-T36 before Phase 2 begins.
+4. `VALIDATION_PLAN.md` is extended with T12-T43 before Phase 2 begins.
 5. v1 migration + validation suite passes in a clean environment.
 6. Dual-review parent/child closure policy is enforced in automated tests.
 7. Execution policy prevents shared-workspace branch interference in automated tests.
