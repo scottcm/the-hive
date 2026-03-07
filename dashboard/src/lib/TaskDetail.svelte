@@ -245,12 +245,12 @@
           />
         </div>
         <div class="sidebar-field">
-          <label>Milestone</label>
+          <span class="field-label">Milestone</span>
           <span>{task.milestone_name}</span>
         </div>
         {#if task.tags.length > 0}
           <div class="sidebar-field">
-            <label>Tags</label>
+            <span class="field-label">Tags</span>
             <div class="tags">
               {#each task.tags as tag}
                 <span class="tag">{tag}</span>
@@ -260,7 +260,7 @@
         {/if}
         {#if (task.blocked_by ?? []).length > 0}
           <div class="sidebar-field">
-            <label>Blocked by</label>
+            <span class="field-label">Blocked by</span>
             {#each task.blocked_by as dep}
               <a href={`/tasks/${dep.id}`} class="dep-link">
                 <span class="dep-status status-{dep.status}"></span>#{dep.id} {dep.title}
@@ -270,7 +270,7 @@
         {/if}
         {#if (task.blocks ?? []).length > 0}
           <div class="sidebar-field">
-            <label>Blocks</label>
+            <span class="field-label">Blocks</span>
             {#each task.blocks as dep}
               <a href={`/tasks/${dep.id}`} class="dep-link">
                 <span class="dep-status status-{dep.status}"></span>#{dep.id} {dep.title}
@@ -322,7 +322,7 @@
 
   .sidebar { display: flex; flex-direction: column; gap: 16px; }
   .sidebar-field { display: flex; flex-direction: column; gap: 4px; }
-  .sidebar-field label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sidebar-field label, .sidebar-field .field-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
   .sidebar-field select, .sidebar-field input[type="text"] { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; }
   .dep-link { display: flex; align-items: center; gap: 6px; color: #58a6ff; text-decoration: none; font-size: 13px; margin-bottom: 2px; }
   .dep-link:hover { text-decoration: underline; }
