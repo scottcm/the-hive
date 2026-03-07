@@ -46,8 +46,8 @@ Specific gaps:
 3. **Capability/trust routing is too coarse.** No support for per-capability ratings
    (for example, review judgment vs review coverage).
 
-4. **No enforceable dual-review workflow.** Teams requiring two distinct review modes
-   (judgment + coverage) cannot gate completion via task structure.
+4. **No enforceable review workflow.** Review cannot be gated via task structure.
+   <!-- v1.1: extends to dual-review with judgment + coverage modes -->
 
 5. **No branch/worktree execution policy.** Multiple agents can interfere in a shared
    clone by switching branches and mutating each other's workspace.
@@ -67,7 +67,7 @@ Specific gaps:
 
 1. Make tasks self-sufficient for agent execution without custom human prompts.
 2. Model agent profiles, concurrent sessions, capabilities, and trust so routing is automatic and enforced.
-3. Support dual-review workflows as first-class policy (`review-judgment` + `review-coverage`) with reconciliation.
+3. Support review workflows as first-class policy with child task gating. <!-- v1.1: dual-review with reconciliation -->
 4. Add domain ownership to milestones so clarifications route correctly.
 5. Enrich projects/milestones/tasks with schema-validated specs.
 6. Enforce safe concurrent execution through branch/worktree policy at claim/start time.
@@ -169,10 +169,10 @@ Once seeded, the database copy is authoritative. Runtime capability checks read 
 require a re-seed operation, which is an auditable action logged in the identity
 audit table (section 8.12).
 
-Initial review roles:
+<!-- v1.1: splits review into review-judgment and review-coverage roles — see V1.1_DEFERRED.md #D2 -->
+Initial review role:
 
-- `review-judgment` (severity calibration, final verdict quality)
-- `review-coverage` (exhaustive secondary sweep)
+- `review` (code review: correctness, risk, coverage)
 
 ### 7.3 Enriched Project and Milestone Records
 
@@ -228,7 +228,8 @@ Tasks gain structured execution data and workflow typing.
 
 Agent execution fields:
 
-- `task_spec` (JSON schema validated)
+- `task_spec` (JSON schema validated; see `TASK_SPEC_SCHEMA.md` for per-type
+  required/optional keys, mutation policy, failure policy, and output contracts)
 - `context`
 - `acceptance_criteria`
 - `github_issue_ids`
@@ -239,20 +240,23 @@ Routing and policy fields:
 - `min_trust_level`
 - `excluded_agents` (write-restricted; see below)
 - `preferred_agent` (write-restricted; see below)
-- `task_type` (`implementation | review_judgment | review_coverage | review_reconciliation | misc`)
-  - `review_judgment` and `review_coverage` are **code reviews**, not self-audits.
-    The reviewer examines the parent task's implementation diff and artifacts as
-    an independent critic. The `task_spec` for review tasks must reference the
-    parent's branch/commit and frame the work as a code review, not a checklist
-    the implementing agent runs against its own output.
-- `parent_task_id` (nullable; links review/reconciliation tasks to parent implementation)
+<!-- v1.1: splits review into review_judgment, review_coverage, review_reconciliation — see V1.1_DEFERRED.md #D2 -->
+- `task_type` (`implementation | review | misc`)
+  - `review` tasks are **code reviews**, not self-audits. The reviewer examines
+    the parent task's implementation diff and artifacts as an independent critic.
+    The `task_spec` for review tasks must reference the parent's branch/commit
+    and frame the work as a code review, not a checklist the implementing agent
+    runs against its own output.
+- `parent_task_id` (nullable; links review tasks to parent implementation)
 - `execution_policy` (JSON schema validated, task-level override)
 
-Routing field write policy: `excluded_agents` and `preferred_agent` can only be set
-at task creation time or by the task's project/milestone owner. `update_task` rejects
-changes to these fields unless the caller's `actor_id` matches the task creator or
-the owning project/milestone `owner`. This prevents agents from monopolizing work or
-excluding competitors.
+Routing and policy field write policy: `excluded_agents`, `preferred_agent`,
+and `execution_policy` can only be set at task creation time or updated by
+the task's project/milestone owner. `update_task` rejects changes to these
+fields unless the caller's `actor_id` matches the task creator or the owning
+project/milestone `owner`. This prevents agents from monopolizing work,
+excluding competitors, or escalating completion privileges (e.g., setting
+`auto_merge = true` on a task they don't own).
 
 v1 security note: because v1 is default-open and unauthenticated, this is a
 cooperative policy control, not a hard security boundary. v2 auth/RBAC will
@@ -313,36 +317,42 @@ as evidence metadata, not as a status value.
 Eligibility filters when session identity is provided:
 
 1. Session is active and lease-valid.
-2. Profile has all required capabilities at allowed level.
+2. Profile has all required capabilities at eligible level (`strong` or
+   `marginal`). Level `blocked` disqualifies the profile for that capability.
+   <!-- v1.1: adds routing preference for strong over marginal — see V1.1_DEFERRED.md #D4 -->
 3. Profile trust level meets/exceeds `min_trust_level`.
 4. Session/profile is not in `excluded_agents`.
 5. `gate_compliant` is true when `min_trust_level > low`.
 6. Execution-policy preconditions pass (worktree/branch lease checks).
 7. Existing queue filters still apply (status/dependencies/not already claimed).
 8. No owner/domain authorization filter is applied in v1.0 (default-open access).
+9. For `review` task types, the claiming session's `profile_id` must differ
+   from the parent implementation task's author `profile_id`. This is a
+   fail-fast enforcement of G4 review separation at claim time — an agent
+   cannot claim a review of its own work.
 
 v1 access policy: default-open visibility (no owner access filtering). Ownership fields
 remain for routing and future v2 authorization.
 
 `claim_task` re-validates eligibility to prevent race conditions.
 
-### 7.6 Review as Child Tasks + Reconciliation Gate
+### 7.6 Review as Child Tasks
 
-For implementation work requiring dual review:
+<!-- v1.1: expands to dual review (judgment + coverage) + reconciliation — see V1.1_DEFERRED.md #D2 -->
+
+For implementation work requiring review:
 
 1. Create one parent `implementation` task.
-2. Create child `review_judgment` task (`parent_task_id = implementation_id`).
-3. Create child `review_coverage` task (`parent_task_id = implementation_id`).
-4. Create child `review_reconciliation` task that resolves combined findings.
+2. Create one child `review` task (`parent_task_id = implementation_id`).
 
-Parent implementation task cannot move to `done` until required child review tasks
-and reconciliation task are `done`.
+Parent implementation task cannot move to `done` until the child review task
+is `done` (enforced by G0 child closure).
 
 **Code review, not self-audit.** v0.9 allowed agents to satisfy G4 by recording
 `review_output` evidence against their own work — effectively a self-audit
 checklist. v1 eliminates this pattern. Review child tasks are code reviews:
 the reviewer reads the parent's implementation diff, evaluates correctness and
-risk, and records findings as an independent critic. The `task_spec` for each
+risk, and records findings as an independent critic. The `task_spec` for the
 review child task must include the parent's branch or commit ref so the reviewer
 can inspect the actual changes. `create_task` rejects review child tasks whose
 `task_spec` does not contain a `review_ref` field (branch name or commit SHA).
@@ -363,7 +373,7 @@ a code review by a separate reviewer.
 
 G4 review separation is enforced at the **profile** level, not the session level.
 When evaluating G4, the engine resolves the `profile_id` for both the implementation
-author's `claim_session_id` and each reviewer's `actor_id`. The invariant is:
+author's `claim_session_id` and the reviewer's `actor_id`. The invariant is:
 `reviewer_profile_id != author_profile_id`. This prevents self-review via session
 aliasing (e.g., `scott.codex.worker.01` implementing and `.02` reviewing).
 
@@ -391,6 +401,14 @@ Clarifications gain a routing chain and explicit target identity:
 
 `routed_to` stores the target principal/session identity. Target inbox retrieval is
 explicitly supported by clarification listing/query tools.
+
+<!-- v1.1: adds timeout-based auto-escalation — see V1.1_DEFERRED.md #D3 -->
+**Escalation trigger (v1.0).** Escalation is manual: the current routee calls
+`update_clarification(id, routed_to=<next_in_chain>)` to pass the
+clarification up the chain. Automatic timeout-based escalation is deferred to
+v1.1. The chain order is: milestone owner -> project owner -> `human-required`
+(a sentinel value indicating the clarification needs human attention outside
+the system).
 
 #### 7.7a Clarification State Machine
 
@@ -446,26 +464,109 @@ mitigated by the ID format CHECK on `agent_sessions.id` (section 8.2).
 
 These checks are enforced at claim/start and completion evidence validation.
 
+**Completion actions.** The execution policy defines what the agent does
+after gates pass and the task moves to `done`:
+
+- `on_complete = push_and_pr` — agent pushes the task branch and creates a
+  pull request against `target_branch` (default: `main`).
+- `on_complete = push_only` — agent pushes but does not create a PR (useful
+  when a manager or CI creates PRs).
+- `on_complete = none` — agent does not push (branch stays local; a manager
+  or pipeline handles delivery).
+
+**Task type defaults:** `implementation` tasks default to
+`on_complete = push_and_pr`. `review` tasks default to `on_complete = none`
+(read-only, no branch to push). `misc` tasks default to `on_complete = none`.
+Task creators can override these defaults in `execution_policy`.
+
+Additional completion policy keys:
+
+- `target_branch` (default: `main`) — PR target / merge base. Validated
+  against `^[a-zA-Z0-9._/-]+$` and must not equal the task's own branch.
+  Branch existence is validated at PR creation time.
+- `auto_merge = false` (default) — if `true`, the PR is merged by the
+  implementing agent after confirming the review child task is `done`. If
+  the implementing agent's session expires before review completes, the
+  merge is deferred to a manager or the next agent that claims a follow-up
+  task. `auto_merge = true` is appropriate only when CI checks provide
+  sufficient merge-time validation; it does not wait for external CI
+  pipelines.
+- `pr_title_template` (default: `task/{task_id}: {task_title}`) — PR title
+  format. Interpolated values have newlines and control characters stripped;
+  total title is truncated to 200 characters.
+- `delete_branch_on_merge = true` (default) — clean up the task branch after
+  merge.
+
+**Input validation.** All rendered branch names (from `branch_name_template`,
+`task_spec.branch`, or `target_branch`) are validated against
+`^[a-zA-Z0-9._/-]+$` before any git operation. `task_spec.branch` overrides
+follow the same validation rules as `branch_name_template` interpolated
+values.
+
+**Completion ordering.** Completion actions execute **after** the task
+transitions to `done`, not before:
+
+1. Agent records all evidence (diff, tests, audit, handoff).
+2. Agent calls `update_task(status=done)` — gates validate evidence. If
+   gates fail, the task stays `in_progress` and no completion actions run.
+3. Gates pass, task transitions to `done`, claim fields cleared.
+4. Agent executes completion actions (push, PR creation).
+5. Agent records `pr_url` as a post-completion evidence artifact.
+
+If a completion action fails (e.g., PR creation fails because target branch
+doesn't exist), the task stays `done` (gates already passed). The agent
+raises a clarification or adds a note flagging the delivery failure.
+Completion actions are idempotent: `git push` is safe for identical content,
+PR creation checks for an existing PR on the same branch, and merge checks
+PR state before acting.
+
 ### 7.9 Stale-Claim Recovery
 
 A background job recovers claims from dead or unresponsive agents.
 
 Timing parameters:
 
-- **Heartbeat interval**: agents call `heartbeat_task` every 5 minutes.
-- **Heartbeat deadline**: `claim_task` sets `heartbeat_deadline = now() + 15 min`.
-  Each `heartbeat_task` call extends the deadline by another 15 minutes.
-- **Grace period**: the recovery job runs every 5 minutes and only reclaims tasks
-  where `heartbeat_deadline < now()`. The 15-minute deadline provides a 10-minute
-  grace window beyond the expected 5-minute heartbeat interval.
+- **Session heartbeat interval**: agents call `heartbeat_agent_session` every
+  5 minutes to extend `lease_expires_at`.
+- **Session lease**: `start_agent_session` sets `lease_expires_at = now() + 15 min`.
+  Each heartbeat extends the lease by another 15 minutes.
+- **Task claim deadline**: `claim_task` sets `heartbeat_deadline` equal to the
+  session's `lease_expires_at`. Each `heartbeat_agent_session` propagates the
+  new lease to all tasks claimed by that session.
+- **Grace period**: the recovery job runs every 5 minutes. The 15-minute lease
+  provides a 10-minute grace window beyond the expected 5-minute heartbeat
+  interval.
+<!-- v1.1: task-level heartbeat becomes independent — see V1.1_DEFERRED.md #D1 -->
 
 Recovery behavior:
 
-1. `UPDATE hive.tasks SET status = 'open', assigned_to = NULL, claim_token = NULL, claim_session_id = NULL, heartbeat_deadline = NULL WHERE status = 'in_progress' AND heartbeat_deadline < now()`.
-2. Emit a `gate_event` with `gate_name = 'heartbeat_expired'` for each reclaimed task.
-3. Session expiry also triggers claim release: if `agent_sessions.status` becomes
-   `expired`, the recovery job releases any tasks where `claim_session_id` matches
-   the expired session, regardless of `heartbeat_deadline`.
+1. **Session-level heartbeat expiry.** Expire sessions with lapsed leases:
+   `UPDATE hive.agent_sessions SET status = 'expired' WHERE status = 'active' AND lease_expires_at < now()`.
+   <!-- v1.1: adds independent task-level heartbeat expiry sweep, see V1.1_DEFERRED.md #D1 -->
+2. **Session-level expiry cascade.** When `agent_sessions.status` becomes `expired`
+   (lease expiry or profile deactivation), the recovery job releases all tasks
+   claimed by that session, regardless of task status or `heartbeat_deadline`:
+   - `in_progress` tasks transition to `open`, claim fields cleared.
+   - `blocked` (claimed) tasks stay `blocked`, claim fields cleared
+     (blocked-claimed -> blocked-unclaimed).
+   - SQL: `UPDATE hive.tasks SET assigned_to = NULL, claim_token = NULL, claim_session_id = NULL, heartbeat_deadline = NULL, status = CASE WHEN status = 'in_progress' THEN 'open' ELSE status END WHERE claim_session_id = $expired_session_id`.
+3. **Gate event emission.** A `gate_event` with `gate_name = 'heartbeat_expired'`
+   is emitted for every task whose claim is released by steps 1 or 2, regardless
+   of whether the task was `in_progress` or `blocked` at the time of release.
+
+**Transactionality.** Each session-expiry cascade (step 1 session expiry +
+step 2 task releases + step 3 gate event inserts for that session) runs in a
+single database transaction to ensure gate events are emitted atomically with
+task releases. Idempotency key cleanup runs as an independent operation —
+it is idempotent and safe to retry on failure.
+
+<!-- v1.1: independent task-level heartbeat deferred, see docs/architecture/V1.1_DEFERRED.md #D1 -->
+**Heartbeat contract.** Agents must heartbeat their session
+(`heartbeat_agent_session`, extends `lease_expires_at`). Task claim liveness
+is derived from session liveness — `claim_task` sets `heartbeat_deadline`
+equal to `lease_expires_at`, and each `heartbeat_agent_session` call
+propagates the new deadline to all tasks claimed by that session. Independent
+per-task heartbeat deadlines are deferred to v1.1.
 
 Branch cleanup on expired claims: the released task retains its `execution_policy`
 branch name template. A new claimant gets a fresh branch name. Stale branches from
@@ -579,9 +680,12 @@ ALTER TABLE hive.tasks
     ADD COLUMN excluded_agents        text[] NOT NULL DEFAULT '{}',
     ADD COLUMN preferred_agent        text,
     ADD COLUMN task_type              text NOT NULL DEFAULT 'misc'
-                                       CHECK (task_type IN ('implementation', 'review_judgment', 'review_coverage', 'review_reconciliation', 'misc')),
+                                       CHECK (task_type IN ('implementation', 'review', 'misc')),
+                                       -- v1.1: adds review_judgment, review_coverage, review_reconciliation
     ADD COLUMN parent_task_id         int REFERENCES hive.tasks(id)
                                        CHECK (parent_task_id != id),
+    ADD COLUMN replacement_task_id   int REFERENCES hive.tasks(id)
+                                       CHECK (replacement_task_id != id),
     ADD COLUMN claim_token            uuid,
     ADD COLUMN claim_session_id       text REFERENCES hive.agent_sessions(id),
     ADD COLUMN heartbeat_deadline     timestamptz,
@@ -653,6 +757,18 @@ CREATE TABLE hive.task_idempotency_keys (
 
 CREATE INDEX ON hive.task_idempotency_keys (expires_at);
 ```
+
+**Replay semantics.** Idempotency keys are globally unique — callers are
+responsible for namespacing (e.g., prefixing with agent session ID). Behavior:
+
+- **Key miss:** execute the operation normally, store the result in
+  `result_json` with a 24-hour TTL.
+- **Key hit:** return the stored `result_json` without re-executing. Payload
+  consistency is not checked — the key alone is the discriminator. This means
+  a replayed `claim_task` returns the original claim result (no double-claim
+  error), and a replayed `create_task` returns the original task (no
+  duplicate).
+- **Expired key:** treated as a miss (operation re-executes).
 
 Cleanup: the stale-claim recovery background job (section 7.9) also runs
 `DELETE FROM hive.task_idempotency_keys WHERE expires_at < now()` on each sweep.
@@ -840,12 +956,15 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 | `register_agent_profile` | Insert a new agent profile (fails if ID already exists) |
 | `update_agent_profile` | Update an existing profile; caller `actor_id` must match `created_by` |
 | `start_agent_session` | Create/renew an active agent session |
-| `heartbeat_agent_session` | Refresh session lease |
-| `heartbeat_task` | Refresh an active task claim heartbeat using `claim_token` |
+| `heartbeat_agent_session` | Refresh session lease (`lease_expires_at`). Propagates new deadline to `heartbeat_deadline` on all tasks where `claim_session_id` matches this session (§7.9). |
+| `heartbeat_task` | v1.0: no-op alias (task deadline derived from session lease). v1.1: independently extends `heartbeat_deadline`. <!-- v1.1: see V1.1_DEFERRED.md #D1 --> |
 | `end_agent_session` | Mark session inactive |
 | `list_agent_profiles` | List registered profiles |
 | `list_capabilities` | Return capability taxonomy and levels |
 | `validate_spec` | Validate project/milestone/task spec payload against current schema version |
+| `release_task` | Release an active claim; transitions `in_progress` -> `open`, clears claim fields. Requires `task_id` + `claim_token`. Also used internally by `end_agent_session` and the recovery job. |
+| `supersede_task` | Transitions a task to `superseded` from `open`, `in_progress`, `blocked` (claimed or unclaimed). Clears claim fields if present. Parameters: `task_id`, `replacement_task_id` (optional, recorded for traceability), `reason`. v1.0: cooperative-only — any agent may call, restricted by deployment boundary. <!-- v1.1: consider owner/manager check --> |
+| `reopen_task` | Transitions a `done` or `superseded` task back to `open`. Claim fields stay NULL. Parameters: `task_id`, `reason`. v1.0: cooperative-only — any agent may call, restricted by deployment boundary. <!-- v1.1: consider owner/manager check --> |
 
 ### Modified tools
 
@@ -859,8 +978,12 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 | `create_project` / `update_project` | Accept `project_spec`, execution policy, intent fields |
 | `create_milestone` / `update_milestone` | Accept `milestone_spec`, execution policy, `domain`, `owner` |
 | `create_clarification` | Auto-populate `routed_to` via routing chain |
+| `update_clarification` | Update `routed_to` for manual escalation (v1.0 escalation trigger) |
 | `list_clarifications` | Add filtering by `routed_to` |
 | All mutating tools | Support optional `idempotency_key`; resolve through `hive.task_idempotency_keys` |
+
+All tools are designed for both agent and human callers. Human operators
+interact through the same API surface via dashboard, CLI, or direct MCP calls.
 
 ---
 
@@ -874,23 +997,24 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 4. Agent loads `task_spec` (+ project/milestone specs + resolved execution policy).
 5. If blocked: `create_clarification` routes by domain ownership.
 6. During execution, evidence writes require matching active session/claim token.
-7. On completion: evidence + handoff + review child tasks + reconciliation + G1-G5 -> `done`.
+7. On completion: evidence + handoff + review child task + G0-G5 -> `done`.
 
-### Review workflow (dual-review)
+### Review workflow
+
+<!-- v1.1: expands to dual-review with reconciliation — see V1.1_DEFERRED.md #D2 -->
 
 1. Parent implementation task created.
-2. Required child review tasks created (`review_judgment`, `review_coverage`).
-   Each child `task_spec` includes a `review_ref` pointing to the parent's
-   branch or commit, so the reviewer examines the actual implementation diff.
-3. Reviewer agent claims a review child task and performs a code review —
-   reading the diff, evaluating correctness, identifying risks, and recording
-   findings. This is not a self-audit; the reviewer has no prior context from
-   the implementation and approaches the code as an independent critic.
+2. Child `review` task created. The `task_spec` includes a `review_ref`
+   pointing to the parent's branch or commit, so the reviewer examines the
+   actual implementation diff.
+3. Reviewer agent claims the review task and performs a code review — reading
+   the diff, evaluating correctness, identifying risks, and recording findings.
+   This is not a self-audit; the reviewer has no prior context from the
+   implementation and approaches the code as an independent critic.
 4. If the reviewer approves, the review task moves to `done`. If the reviewer
    requests changes, the review task returns to `open` and the implementer
    addresses the findings. Steps 3-4 repeat until approved.
-5. Child reconciliation task merges findings and records final disposition.
-6. Parent closes only after child review/reconciliation tasks are complete.
+5. Parent closes only after the child review task is complete (G0 enforced).
 
 ### Clarification resolution
 
@@ -904,7 +1028,7 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 1. Create project with intent fields + `project_spec` + default execution policy.
 2. Create milestones with `domain`, `owner`, `milestone_spec`, policy overrides.
 3. Create tasks with `task_spec`, capabilities/trust, review/workflow type, GitHub links.
-4. Encode implementation/review/reconciliation dependencies explicitly.
+4. Encode implementation/review dependencies explicitly.
 
 ---
 
@@ -939,14 +1063,14 @@ Success criteria:
 
 ### Phase 3: Review Workflow and Clarification Routing
 
-1. Enforce parent-child review/reconciliation closure gating.
-2. Add reconciliation artifact requirements.
-3. Implement full clarification routing query surface (`routed_to`).
+1. Enforce parent-child review closure gating (G0).
+2. Implement full clarification routing query surface (`routed_to`).
 
 Success criteria:
 
-- Parent implementation tasks cannot close before required review child tasks.
-- Dual-review workflow is machine-enforced, not convention-based.
+- Parent implementation tasks cannot close before the review child task is done.
+- Review workflow is machine-enforced, not convention-based.
+<!-- v1.1: Phase 3 expands to dual-review + reconciliation -->
 
 ---
 
@@ -964,8 +1088,9 @@ v1.0 validation extends `docs/VALIDATION_PLAN.md` with scenarios:
   - Verify dedicated worktree/per-task branch checks block invalid claims.
 - **T16: Spec validation**
   - Reject invalid `project_spec`, `milestone_spec`, `task_spec` payloads.
-- **T17: Dual-review child-task gating**
-  - Parent implementation task cannot move to `done` until review/reconciliation children are done.
+- **T17: Review child-task gating**
+  - Parent implementation task cannot move to `done` until review child is done.
+  <!-- v1.1: extends to dual-review + reconciliation children -->
 - **T18: Clarification routing**
   - Verify `routed_to` chain and escalation behavior.
 - **T19: Session concurrency**
@@ -1015,8 +1140,8 @@ v1.0 validation extends `docs/VALIDATION_PLAN.md` with scenarios:
   - `superseded` is accepted as a terminal status.
   - G0 and dependency queries treat `superseded` as terminal.
 - **T33: Review task requires review_ref**
-  - `create_task` with `task_type` of `review_judgment` or `review_coverage` and
-    a `task_spec` missing `review_ref` is rejected.
+  - `create_task` with `task_type` of `review` and a `task_spec` missing
+    `review_ref` is rejected.
   - `review_ref` must be a non-empty string (branch name or commit SHA).
 - **T34: Review changes-requested cycle**
   - Review task with `verdict: "changes_requested"` returns to `open` with claim
@@ -1083,7 +1208,7 @@ Migration approach:
 4. Enforce `created_by` non-null (`ALTER TABLE hive.tasks ALTER COLUMN created_by SET NOT NULL`).
 5. Migrate/seed tasks into `task_spec` and workflow types.
 6. Rebuild implementation/review relationships as parent-child links.
-7. Enable dual-review closure gates after migration verification.
+7. Enable review closure gates (G0 child closure) after migration verification.
 8. Backfill `actor_id` where possible for seeded/migrated records; enforce non-null for all new writes at application layer.
 
 No runtime backward-compatibility layer is required.
@@ -1099,5 +1224,5 @@ This design is accepted when:
 3. All schema additions have corresponding migration files.
 4. `VALIDATION_PLAN.md` is extended with T12-T43 before Phase 2 begins.
 5. v1 migration + validation suite passes in a clean environment.
-6. Dual-review parent/child closure policy is enforced in automated tests.
+6. Review parent/child closure policy is enforced in automated tests.
 7. Execution policy prevents shared-workspace branch interference in automated tests.

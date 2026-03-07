@@ -35,8 +35,10 @@ evidence, handoff.
    - Assert: claim_token, claim_session_id, heartbeat_deadline all set.
    - Assert: claim_token returned in response.
 
-4. `heartbeat_task(task_id=T1, claim_token=<token>)`
-   - Assert: heartbeat_deadline extended.
+4. `heartbeat_agent_session(id='scott.codex.worker.01')`
+   - Assert: lease_expires_at extended.
+   - Assert: heartbeat_deadline on T1 propagated to match new lease_expires_at.
+   - Note: `heartbeat_task` is accepted but is a no-op in v1.0 (D1 deferral).
 
 5. Record evidence: red_run, implementation_commit, green_run, review_output
    (reviewer != author profile), handoff_packet with required fields.
@@ -44,7 +46,7 @@ evidence, handoff.
      immutable=true, SHA-256 hash.
 
 6. `update_task(task_id=T1, status='done')`
-   - Assert: G1-G5 all pass, gate events recorded.
+   - Assert: G0-G5 all pass (G0 trivially — no children), gate events recorded.
    - Assert: T1 status=done, claim fields cleared.
 
 7. `end_agent_session(id='scott.codex.worker.01')`
@@ -59,21 +61,20 @@ evidence, handoff.
 
 ---
 
-## UC-02: Dual-review with changes-requested cycle
+## UC-02: Review with changes-requested cycle
 
-Covers: review child tasks (7.6), review verdict lifecycle, G0_child_closure,
+Covers: review child task (7.6), review verdict lifecycle, G0_child_closure,
 G4 profile-level self-review prevention, code review framing.
+
+<!-- v1.1: expands to dual-review (judgment + coverage + reconciliation) — see V1.1_DEFERRED.md #D2 -->
 
 ### Preconditions
 
 - Two profiles: `scott.codex.worker` (implementer), `scott.claude.reviewer`
   (reviewer). Different profile IDs.
 - Task T-IMPL: task_type=implementation, status=open, task contract set.
-- Task T-RJ: task_type=review_judgment, parent_task_id=T-IMPL,
+- Task T-REV: task_type=review, parent_task_id=T-IMPL,
   task_spec contains review_ref='task/T-IMPL-branch'.
-- Task T-RC: task_type=review_coverage, parent_task_id=T-IMPL,
-  task_spec contains review_ref='task/T-IMPL-branch'.
-- Task T-RECON: task_type=review_reconciliation, parent_task_id=T-IMPL.
 
 ### Steps
 
@@ -81,40 +82,34 @@ G4 profile-level self-review prevention, code review framing.
    evidence (red_run, green_run, implementation_commit, handoff_packet).
 
 2. Implementer attempts `update_task(T-IMPL, status='done')`.
-   - Assert: **rejected** by G0_child_closure (T-RJ, T-RC, T-RECON not done).
+   - Assert: **rejected** by G0_child_closure (T-REV not done).
 
-3. Reviewer session (`scott.claude.reviewer.01`) claims T-RJ.
+3. Reviewer session (`scott.claude.reviewer.01`) claims T-REV.
    - Assert: G4 check passes (reviewer_profile_id != author_profile_id).
 
-4. Implementer session (`scott.codex.worker.02`) attempts to claim T-RJ.
+4. Implementer session (`scott.codex.worker.02`) attempts to claim T-REV.
    - Assert: **rejected** — same profile as implementer (G4 profile-level).
 
 5. Reviewer performs code review, finds issues. Records review_output evidence
    with `verdict: "changes_requested"` and findings.
-   - Assert: T-RJ returns to status=open, claim fields cleared.
+   - Assert: T-REV returns to status=open, claim fields cleared.
 
 6. Implementer addresses findings on T-IMPL (still claimed, still in_progress).
    Pushes new commits to branch.
 
-7. Reviewer (same or different reviewer profile) re-claims T-RJ.
+7. Reviewer (same or different reviewer profile) re-claims T-REV.
    - Assert: G4 re-evaluated on new claim.
 
 8. Reviewer approves. Records review_output with `verdict: "approved"`.
-   - Assert: T-RJ moves to done.
+   - Assert: T-REV moves to done.
 
-9. Separate reviewer claims and completes T-RC (approved on first pass).
-   - Assert: T-RC done.
-
-10. Reconciliation agent claims and completes T-RECON.
-    - Assert: T-RECON done.
-
-11. Implementer retries `update_task(T-IMPL, status='done')`.
-    - Assert: G0 passes (all children done). G1-G5 pass. T-IMPL done.
+9. Implementer retries `update_task(T-IMPL, status='done')`.
+   - Assert: G0 passes (T-REV done). G1-G5 pass. T-IMPL done.
 
 ### Postconditions
 
-- T-IMPL, T-RJ, T-RC, T-RECON all done.
-- T-RJ has two review_output evidence records (changes_requested + approved).
+- T-IMPL and T-REV both done.
+- T-REV has two review_output evidence records (changes_requested + approved).
 - No self-review occurred at profile level.
 
 ---
@@ -485,15 +480,15 @@ Covers: review_ref validation (7.6), T33.
 
 ### Steps
 
-1. `create_task(task_type='review_judgment', parent_task_id=T-IMPL,
+1. `create_task(task_type='review', parent_task_id=T-IMPL,
    task_spec={})`
    - Assert: **rejected** (task_spec missing review_ref).
 
-2. `create_task(task_type='review_judgment', parent_task_id=T-IMPL,
+2. `create_task(task_type='review', parent_task_id=T-IMPL,
    task_spec={review_ref: ''})`
    - Assert: **rejected** (review_ref empty).
 
-3. `create_task(task_type='review_judgment', parent_task_id=T-IMPL,
+3. `create_task(task_type='review', parent_task_id=T-IMPL,
    task_spec={review_ref: 'task/42-scott.codex.worker.01'})`
    - Assert: succeeds.
 
@@ -509,7 +504,7 @@ Covers: single-level nesting (7.4), self-reference prevention (8.6).
 ### Preconditions
 
 - Task T-IMPL (implementation, parent_task_id=NULL).
-- Task T-RJ (review_judgment, parent_task_id=T-IMPL).
+- Task T-RJ (review, parent_task_id=T-IMPL).
 
 ### Steps
 
@@ -667,7 +662,7 @@ Covers: override system, expire_override, gate re-evaluation.
 1. `update_task(T1, status='done')` -> Assert: **rejected** (G3 fails).
 
 2. `create_task_override(task_id=T1, gate_name='G3_verification',
-   scope='missing test infra', approved_by='manager-01',
+   scope='missing test infra', actor_id='manager-01',
    reason='test framework not ready', expires_at=<future>)`
    - Assert: override created.
 
@@ -684,31 +679,31 @@ Covers: override system, expire_override, gate re-evaluation.
 Covers: all state machines in sequence — project, milestone, task, session,
 clarification, review.
 
+<!-- v1.1: expands to dual-review (judgment + coverage + reconciliation) — see V1.1_DEFERRED.md #D2 -->
+
 ### Steps
 
 1. Create project P1 (active) with project_spec and execution_policy.
 2. Create milestone M1 (active) under P1 with domain and owner.
 3. Create implementation task T1 under M1 with task_spec.
-4. Create review_judgment T-RJ and review_coverage T-RC as children of T1.
-5. Create review_reconciliation T-RECON as child of T1.
+4. Create review task T-REV as child of T1 with review_ref.
 
-6. Worker session starts, claims T1, implements, records evidence.
-7. Worker raises clarification -> T1 blocked (claimed).
-8. Owner answers -> T1 resumes to in_progress.
-9. Worker finishes implementation.
+5. Worker session starts, claims T1, implements, records evidence.
+6. Worker raises clarification -> T1 blocked (claimed).
+7. Owner answers -> T1 resumes to in_progress.
+8. Worker finishes implementation.
 
-10. Worker attempts done -> rejected by G0 (children not done).
+9. Worker attempts done -> rejected by G0 (T-REV not done).
 
-11. Reviewer session claims T-RJ, reviews, requests changes -> T-RJ returns to open.
-12. Worker fixes, reviewer re-claims T-RJ, approves -> T-RJ done.
-13. Different reviewer claims and approves T-RC -> T-RC done.
-14. Reconciliation agent claims and completes T-RECON -> T-RECON done.
+10. Reviewer session claims T-REV, reviews, requests changes -> T-REV returns to open.
+11. Worker fixes, reviewer re-claims T-REV, approves -> T-REV done.
 
-15. Worker retries done on T1 -> G0 passes, G1-G5 pass, T1 done.
-16. Worker session ends.
+12. Worker retries done on T1 -> G0 passes, G1-G5 pass, T1 done.
+13. Worker executes completion actions (push, PR creation per execution_policy).
+14. Worker session ends.
 
-17. `update_milestone(M1, status='done')` -> succeeds (all tasks done).
-18. `update_project(P1, status='archived')` -> succeeds (M1 done).
+15. `update_milestone(M1, status='done')` -> succeeds (all tasks done/superseded).
+16. `update_project(P1, status='archived')` -> succeeds (M1 done).
 
 ### Postconditions
 
