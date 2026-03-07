@@ -14,7 +14,7 @@ TASK_STATUSES = {"open", "in_progress", "blocked", "done", "cancelled", "superse
 VALID_TRANSITIONS: dict[str, set[str]] = {
     "open": {"in_progress", "cancelled", "superseded"},
     "in_progress": {"blocked", "done", "cancelled", "superseded"},
-    "blocked": {"in_progress", "open", "cancelled", "superseded"},
+    "blocked": {"in_progress", "cancelled", "superseded"},
     "done": set(),
     "cancelled": set(),
     "superseded": set(),
@@ -509,32 +509,27 @@ async def _record_gate_event(
     )
 
 
-async def _assert_task_can_start(
+async def _evaluate_start_gate(
     task_id: int,
     conn: Any,
-) -> None:
+) -> tuple[str, str]:
+    """Evaluate G_start_dependencies gate. Returns (decision, reason). Does not raise."""
     cursor = conn.cursor(row_factory=dict_row)
     await cursor.execute(
-        """
-        SELECT depends_on
-        FROM hive.tasks
-        WHERE id = %s
-        """,
+        "SELECT depends_on FROM hive.tasks WHERE id = %s",
         (task_id,),
     )
     task_row = await cursor.fetchone()
     if task_row is None:
-        raise ValueError(f"Task {task_id} not found")
+        return ("fail", f"Task {task_id} not found")
 
     contract = await _fetch_task_contract(task_id, conn)
     if contract is None:
-        raise ValueError(f"Task {task_id} is missing required task contract")
+        return ("fail", f"Task {task_id} is missing required task contract")
 
     depends_on = task_row["depends_on"] or []
     if sorted(contract["dependencies"]) != sorted(depends_on):
-        raise ValueError(
-            f"Task {task_id} contract dependencies do not match task depends_on"
-        )
+        return ("fail", f"Task {task_id} contract dependencies do not match task depends_on")
 
     await cursor.execute(
         """
@@ -548,16 +543,25 @@ async def _assert_task_can_start(
     )
     unmet = await cursor.fetchall()
     if not unmet:
-        return
+        return ("pass", "All dependencies satisfied")
 
     overrides = await _fetch_active_task_overrides(task_id, conn)
     if "G_start_dependencies" in overrides:
-        return
+        return ("override", "Dependency check waived by active G_start_dependencies override")
 
     blockers = ", ".join(f"#{r['id']} ({r['status']})" for r in unmet)
-    raise ValueError(
-        f"Task {task_id} has unmet dependencies: {blockers}"
-    )
+    return ("fail", f"Task {task_id} has unmet dependencies: {blockers}")
+
+
+async def _assert_task_can_start(
+    task_id: int,
+    conn: Any,
+) -> tuple[str, str]:
+    """Evaluate G_start_dependencies gate, raise ValueError on fail. Returns (decision, reason)."""
+    decision, reason = await _evaluate_start_gate(task_id, conn)
+    if decision == "fail":
+        raise ValueError(reason)
+    return decision, reason
 
 
 def _serialize_summary_task(row: dict[str, Any]) -> dict[str, Any]:
@@ -1008,7 +1012,7 @@ async def claim_task(task_id: int, assigned_to: str) -> dict[str, Any]:
                 raise ValueError(f"Task {task_id} not found")
             if existing["status"] != "open":
                 raise ValueError(f"Task {task_id} is not open")
-            await _assert_task_can_start(task_id, conn)
+            decision, reason = await _assert_task_can_start(task_id, conn)
 
             await cursor.execute(
                 """
@@ -1022,6 +1026,14 @@ async def claim_task(task_id: int, assigned_to: str) -> dict[str, Any]:
             row = await cursor.fetchone()
             if row is None:
                 raise ValueError(f"Task {task_id} is not open")
+            await _record_gate_event(
+                task_id=task_id,
+                gate_name="G_start_dependencies",
+                decision=decision,
+                reason=reason,
+                actor=assigned_to,
+                conn=conn,
+            )
             return await _fetch_task_full(task_id, conn)
 
 
@@ -1150,9 +1162,10 @@ async def update_task(
                     f"for task {task_id}"
                 )
 
+        start_gate_result: tuple[str, str] | None = None
         if status == "in_progress" and existing["status"] != "in_progress":
             async with conn.transaction():
-                await _assert_task_can_start(task_id, conn)
+                start_gate_result = await _assert_task_can_start(task_id, conn)
 
         if status == "done":
             gate_results: list[tuple[str, str, str]]
@@ -1206,6 +1219,15 @@ async def update_task(
                     WHERE task_id = %s
                     """,
                     (row["updated_at"], task_id),
+                )
+            if start_gate_result is not None:
+                await _record_gate_event(
+                    task_id=task_id,
+                    gate_name="G_start_dependencies",
+                    decision=start_gate_result[0],
+                    reason=start_gate_result[1],
+                    actor=actor,
+                    conn=conn,
                 )
             return await _fetch_task_full(task_id, conn)
 

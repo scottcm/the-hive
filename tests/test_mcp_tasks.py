@@ -1914,3 +1914,57 @@ async def test_update_task_allows_open_to_cancelled(db_pool):
     task_id = await insert_task(db_pool, title="Open → cancelled admin", status="open")
     task = await tasks.update_task(task_id=task_id, status="cancelled")
     assert task["status"] == "cancelled"
+
+
+async def test_update_task_rejects_blocked_to_open(db_pool):
+    """Finding 2: blocked→open removed; blocked tasks must go to in_progress."""
+    task_id = await insert_task(db_pool, title="Blocked → open invalid", status="blocked")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="open")
+
+
+# ---------------------------------------------------------------------------
+# Gate event audit for non-done transitions (Finding 1 + 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_claim_task_records_start_gate_pass_event(db_pool):
+    task_id = await insert_task(db_pool, title="Claim gate event task", status="open")
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[])
+
+    await tasks.claim_task(task_id, "codex")
+
+    events = await fetch_gate_events(db_pool, task_id)
+    gate_names = [e[0] for e in events]
+    assert "G_start_dependencies" in gate_names
+    start_event = next(e for e in events if e[0] == "G_start_dependencies")
+    assert start_event[1] == "pass"
+
+
+async def test_update_task_to_in_progress_records_start_gate_event(db_pool):
+    task_id = await insert_task(db_pool, title="Update IP gate event", status="open")
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[])
+
+    await tasks.update_task(task_id=task_id, status="in_progress")
+
+    events = await fetch_gate_events(db_pool, task_id)
+    gate_names = [e[0] for e in events]
+    assert "G_start_dependencies" in gate_names
+    start_event = next(e for e in events if e[0] == "G_start_dependencies")
+    assert start_event[1] == "pass"
+
+
+async def test_claim_task_with_override_records_start_gate_override_event(db_pool):
+    dep_id = await insert_task(db_pool, title="Unmet dep", status="open")
+    task_id = await insert_task(
+        db_pool, title="Override start", status="open", depends_on=[dep_id]
+    )
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[dep_id])
+    await insert_task_override(db_pool, task_id=task_id, gate_name="G_start_dependencies")
+
+    await tasks.claim_task(task_id, "codex")
+
+    events = await fetch_gate_events(db_pool, task_id)
+    start_event = next((e for e in events if e[0] == "G_start_dependencies"), None)
+    assert start_event is not None
+    assert start_event[1] == "override"
