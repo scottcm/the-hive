@@ -1038,7 +1038,16 @@ async def claim_task(task_id: int, assigned_to: str) -> dict[str, Any]:
                 raise ValueError(f"Task {task_id} not found")
             if existing["status"] != "open":
                 raise ValueError(f"Task {task_id} is not open")
-            decision, reason = await _assert_task_can_start(task_id, conn)
+            decision, reason = await _evaluate_start_gate(task_id, conn)
+            if decision == "fail":
+                await _record_gate_event_durable(
+                    task_id=task_id,
+                    gate_name="G_start_dependencies",
+                    decision="fail",
+                    reason=reason,
+                    actor=assigned_to,
+                )
+                raise ValueError(reason)
 
             await cursor.execute(
                 """

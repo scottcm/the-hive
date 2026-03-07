@@ -1999,3 +1999,20 @@ async def test_claim_task_with_override_records_start_gate_override_event(db_poo
     start_event = next((e for e in events if e[0] == "G_start_dependencies"), None)
     assert start_event is not None
     assert start_event[1] == "override"
+
+
+async def test_claim_task_fail_records_gate_event(db_pool):
+    """Failed claim (unmet dependencies) must durably record a G_start_dependencies fail event."""
+    dep_id = await insert_task(db_pool, title="Unmet dep", status="open")
+    task_id = await insert_task(
+        db_pool, title="Claim fail audit", status="open", depends_on=[dep_id]
+    )
+    await insert_task_contract(db_pool, task_id=task_id, dependencies=[dep_id])
+
+    with pytest.raises(ValueError, match="unmet dependencies"):
+        await tasks.claim_task(task_id, "codex")
+
+    events = await fetch_gate_events(db_pool, task_id)
+    start_event = next((e for e in events if e[0] == "G_start_dependencies"), None)
+    assert start_event is not None, "G_start_dependencies fail event must be recorded on claim failure"
+    assert start_event[1] == "fail"
