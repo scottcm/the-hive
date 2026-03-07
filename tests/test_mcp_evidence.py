@@ -240,6 +240,7 @@ async def test_marking_task_done_refreshes_existing_evidence_retention_floor(db_
         },
     )
 
+    await tasks.update_task(task_id=task_id, status="in_progress")
     await tasks.update_task(task_id=task_id, status="done")
     done_at = await fetch_task_updated_at(db_pool, task_id=task_id)
     retention_until = await fetch_evidence_retention(

@@ -1855,3 +1855,62 @@ async def test_validate_task_contract_no_contract_fails(db_pool):
     task_id = await insert_task(db_pool, title="No contract task", status="in_progress")
     with pytest.raises(ValueError, match="contract"):
         await tasks.validate_task_contract(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Transition matrix guards in update_task
+# ---------------------------------------------------------------------------
+
+
+async def test_update_task_rejects_done_to_in_progress(db_pool):
+    task_id = await insert_task(db_pool, title="Done task", status="done")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="in_progress")
+
+
+async def test_update_task_rejects_done_to_blocked(db_pool):
+    task_id = await insert_task(db_pool, title="Done task 2", status="done")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="blocked")
+
+
+async def test_update_task_rejects_cancelled_to_in_progress(db_pool):
+    task_id = await insert_task(db_pool, title="Cancelled task", status="cancelled")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="in_progress")
+
+
+async def test_update_task_rejects_superseded_to_open(db_pool):
+    task_id = await insert_task(db_pool, title="Superseded task", status="superseded")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="open")
+
+
+async def test_update_task_rejects_open_to_done(db_pool):
+    task_id = await insert_task(db_pool, title="Open → done invalid", status="open")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_rejects_blocked_to_done(db_pool):
+    task_id = await insert_task(db_pool, title="Blocked → done invalid", status="blocked")
+    with pytest.raises(ValueError, match="transition"):
+        await tasks.update_task(task_id=task_id, status="done")
+
+
+async def test_update_task_allows_in_progress_to_blocked(db_pool):
+    task_id = await insert_task(db_pool, title="IP → blocked valid", status="in_progress")
+    task = await tasks.update_task(task_id=task_id, status="blocked")
+    assert task["status"] == "blocked"
+
+
+async def test_update_task_allows_in_progress_to_cancelled(db_pool):
+    task_id = await insert_task(db_pool, title="IP → cancelled admin", status="in_progress")
+    task = await tasks.update_task(task_id=task_id, status="cancelled")
+    assert task["status"] == "cancelled"
+
+
+async def test_update_task_allows_open_to_cancelled(db_pool):
+    task_id = await insert_task(db_pool, title="Open → cancelled admin", status="open")
+    task = await tasks.update_task(task_id=task_id, status="cancelled")
+    assert task["status"] == "cancelled"

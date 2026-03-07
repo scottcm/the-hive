@@ -245,7 +245,11 @@ async def test_list_tasks_filters(db_pool, client):
     )
     await client.patch(
         f"/api/tasks/{done_task_id}",
-        json={"status": "done", "assigned_to": "codex1"},
+        json={"status": "in_progress", "assigned_to": "codex1"},
+    )
+    await client.patch(
+        f"/api/tasks/{done_task_id}",
+        json={"status": "done"},
     )
 
     by_status = await client.get("/api/tasks", params={"status": "done"})
@@ -426,7 +430,8 @@ async def test_get_task_detail_includes_dependency_summaries(db_pool, client):
             artifact_hash_sha256=hash_suffix * 64,
             captured_by="codex1", metadata=meta,
         )
-    await client.patch(f"/api/tasks/{dep_done['id']}", json={"status": "done", "assigned_to": "codex1"})
+    await client.patch(f"/api/tasks/{dep_done['id']}", json={"status": "in_progress", "assigned_to": "codex1"})
+    await client.patch(f"/api/tasks/{dep_done['id']}", json={"status": "done"})
 
     resp = await client.get(f"/api/tasks/{task['id']}")
 

@@ -8,6 +8,17 @@ from psycopg.rows import dict_row
 from coordinator.db.connection import get_pool
 
 TASK_STATUSES = {"open", "in_progress", "blocked", "done", "cancelled", "superseded"}
+
+# Terminal states require reopen_task / supersede_task instead of update_task.
+# None means the state has no allowed outgoing transitions via update_task.
+VALID_TRANSITIONS: dict[str, set[str]] = {
+    "open": {"in_progress", "cancelled", "superseded"},
+    "in_progress": {"blocked", "done", "cancelled", "superseded"},
+    "blocked": {"in_progress", "open", "cancelled", "superseded"},
+    "done": set(),
+    "cancelled": set(),
+    "superseded": set(),
+}
 SUMMARY_SELECT = """
     SELECT
         t.id,
@@ -1130,6 +1141,14 @@ async def update_task(
                 else "system"
             )
         )
+
+        if status is not None and status != existing["status"]:
+            allowed = VALID_TRANSITIONS.get(existing["status"], set())
+            if status not in allowed:
+                raise ValueError(
+                    f"Invalid transition from '{existing['status']}' to '{status}' "
+                    f"for task {task_id}"
+                )
 
         if status == "in_progress" and existing["status"] != "in_progress":
             async with conn.transaction():
