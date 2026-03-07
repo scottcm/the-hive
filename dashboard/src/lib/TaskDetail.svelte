@@ -17,6 +17,12 @@
     created_at: string;
   }
 
+  interface DependencySummary {
+    id: number;
+    title: string;
+    status: string;
+  }
+
   interface Task {
     id: number;
     title: string;
@@ -32,6 +38,8 @@
     updated_at: string;
     notes: Note[];
     clarifications: Clarification[];
+    blocked_by: DependencySummary[];
+    blocks: DependencySummary[];
   }
 
   let { taskId }: { taskId: number } = $props();
@@ -78,6 +86,19 @@
     answerDrafts = { ...answerDrafts, [clarificationId]: '' };
     void loadTask();
   }
+
+  async function updateField(field: 'status' | 'assigned_to', value: string) {
+    await fetch(`/api/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: value || null })
+    });
+    void loadTask();
+  }
+
+  const answeredClarifications = $derived(
+    task?.clarifications.filter((c) => c.status === 'answered') ?? []
+  );
 </script>
 
 <div class="task-detail">
@@ -154,6 +175,16 @@
             {/each}
           {/if}
 
+          {#if task && answeredClarifications.length > 0}
+            <h3>Answered Clarifications</h3>
+            {#each answeredClarifications as c}
+              <div class="clarification answered">
+                <p class="question"><strong>{c.asked_by}:</strong> {c.question}</p>
+                <p class="answer">{c.answer}</p>
+              </div>
+            {/each}
+          {/if}
+
           {#if task}
             <h3>Notes</h3>
             <div class="notes-list">
@@ -180,12 +211,29 @@
     <aside class="sidebar">
       {#if task}
         <div class="sidebar-field">
-          <label>Status</label>
-          <span class="status status-{task.status}">{task.status.replace('_', ' ')}</span>
+          <label for="status-select">Status</label>
+          <select
+            id="status-select"
+            value={task.status}
+            onchange={(e) => updateField('status', (e.target as HTMLSelectElement).value)}
+          >
+            <option value="open">open</option>
+            <option value="in_progress">in progress</option>
+            <option value="blocked">blocked</option>
+            <option value="done">done</option>
+            <option value="cancelled">cancelled</option>
+            <option value="superseded">superseded</option>
+          </select>
         </div>
         <div class="sidebar-field">
-          <label>Assignee</label>
-          <span>{task.assigned_to ?? 'unassigned'}</span>
+          <label for="assignee-input">Assignee</label>
+          <input
+            id="assignee-input"
+            type="text"
+            value={task.assigned_to ?? ''}
+            placeholder="unassigned"
+            onchange={(e) => updateField('assigned_to', (e.target as HTMLInputElement).value)}
+          />
         </div>
         <div class="sidebar-field">
           <label>Milestone</label>
@@ -199,6 +247,26 @@
                 <span class="tag">{tag}</span>
               {/each}
             </div>
+          </div>
+        {/if}
+        {#if (task.blocked_by ?? []).length > 0}
+          <div class="sidebar-field">
+            <label>Blocked by</label>
+            {#each task.blocked_by as dep}
+              <a href={`/tasks/${dep.id}`} class="dep-link">
+                <span class="dep-status status-{dep.status}"></span>#{dep.id} {dep.title}
+              </a>
+            {/each}
+          </div>
+        {/if}
+        {#if (task.blocks ?? []).length > 0}
+          <div class="sidebar-field">
+            <label>Blocks</label>
+            {#each task.blocks as dep}
+              <a href={`/tasks/${dep.id}`} class="dep-link">
+                <span class="dep-status status-{dep.status}"></span>#{dep.id} {dep.title}
+              </a>
+            {/each}
           </div>
         {/if}
       {/if}
@@ -227,7 +295,9 @@
   .description { color: #c9d1d9; font-size: 14px; line-height: 1.6; }
 
   .clarification { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .clarification.answered { opacity: 0.7; }
   .question { color: #e1e4e8; margin: 0 0 8px; }
+  .answer { color: #8b949e; font-style: italic; margin: 0; }
   textarea { width: 100%; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; border-radius: 4px; padding: 8px; font-size: 13px; resize: vertical; min-height: 60px; box-sizing: border-box; }
 
   .notes-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
@@ -243,6 +313,14 @@
   .sidebar { display: flex; flex-direction: column; gap: 16px; }
   .sidebar-field { display: flex; flex-direction: column; gap: 4px; }
   .sidebar-field label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sidebar-field select, .sidebar-field input[type="text"] { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 13px; }
+  .dep-link { display: flex; align-items: center; gap: 6px; color: #58a6ff; text-decoration: none; font-size: 13px; margin-bottom: 2px; }
+  .dep-link:hover { text-decoration: underline; }
+  .dep-status { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dep-status.status-open { background: #3fb950; }
+  .dep-status.status-in_progress { background: #58a6ff; }
+  .dep-status.status-blocked { background: #f85149; }
+  .dep-status.status-done { background: #6e7681; }
 
   .status { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 12px; display: inline-block; }
   .status-open { background: #1a3a2a; color: #3fb950; }
