@@ -8,7 +8,7 @@ describe('Task Detail View', () => {
     title: 'Wire salience scoring into stage 4',
     description: 'Integrate the salience service scoring into pipeline stage 4.',
     status: 'blocked',
-    assignee: 'codex',
+    assigned_to: 'codex',
     milestone_id: 10,
     milestone_name: 'Phase 3 — System Design',
     tags: ['orchestrator', 'salience'],
@@ -21,8 +21,11 @@ describe('Task Detail View', () => {
       { id: 1, author: 'scott', content: 'Created task.', created_at: '2026-03-04T10:30:00Z' }
     ],
     clarifications: [
-      { id: 1, asked_by: 'codex', question: 'Sync or async?', answer: null, status: 'pending', created_at: '2026-03-04T12:00:00Z' }
-    ]
+      { id: 1, asked_by: 'codex', question: 'Sync or async?', answer: null, status: 'pending', created_at: '2026-03-04T12:00:00Z' },
+      { id: 2, asked_by: 'codex', question: 'Which endpoint?', answer: 'Use /stage4', status: 'answered', created_at: '2026-03-04T13:00:00Z' }
+    ],
+    blocked_by: [{ id: 10, title: 'Upstream task', status: 'in_progress' }],
+    blocks: [{ id: 12, title: 'Downstream task', status: 'open' }]
   };
 
   beforeEach(() => {
@@ -76,7 +79,7 @@ describe('Task Detail View', () => {
     });
   });
 
-  it('can post a new note', async () => {
+  it('can post a new note with author and content', async () => {
     fetchMock.mockResponse(async (req) => {
         if (req.method === 'POST' && req.url.endsWith('/api/tasks/2/notes')) {
             return JSON.stringify({ id: 2, author: 'scott', content: 'New note', created_at: new Date().toISOString() });
@@ -89,9 +92,12 @@ describe('Task Detail View', () => {
     const activityTab = screen.getByText(/Activity/i);
     await fireEvent.click(activityTab);
 
+    const authorInput = screen.getByPlaceholderText('Your name');
+    await fireEvent.input(authorInput, { target: { value: 'scott' } });
+
     const input = screen.getByPlaceholderText('Add a note...');
     await fireEvent.input(input, { target: { value: 'New note' } });
-    
+
     const postBtn = screen.getByText('Post');
     await fireEvent.click(postBtn);
 
@@ -99,8 +105,91 @@ describe('Task Detail View', () => {
         expect.stringContaining('/api/tasks/2/notes'),
         expect.objectContaining({
             method: 'POST',
-            body: JSON.stringify({ content: 'New note' })
+            body: JSON.stringify({ author: 'scott', content: 'New note' })
         })
     );
+  });
+
+  it('shows answered clarifications in Activity tab', async () => {
+    fetchMock.mockResponse(JSON.stringify(mockTask));
+
+    render(TaskDetail, { taskId: 2 });
+
+    const activityTab = screen.getByText(/Activity/i);
+    await fireEvent.click(activityTab);
+
+    await waitFor(() => {
+      expect(screen.getByText('Which endpoint?')).toBeInTheDocument();
+      expect(screen.getByText('Use /stage4')).toBeInTheDocument();
+    });
+  });
+
+  it('submits answer with correct PATCH payload', async () => {
+    fetchMock.mockResponse(async (req) => {
+      if (req.method === 'PATCH' && req.url.includes('/api/clarifications/1')) {
+        return JSON.stringify({});
+      }
+      return JSON.stringify(mockTask);
+    });
+
+    render(TaskDetail, { taskId: 2 });
+
+    const activityTab = screen.getByText(/Activity/i);
+    await fireEvent.click(activityTab);
+
+    await waitFor(() => expect(screen.getByPlaceholderText('Type your answer...')).toBeInTheDocument());
+
+    const textarea = screen.getByPlaceholderText('Type your answer...');
+    await fireEvent.input(textarea, { target: { value: 'Async please' } });
+    await fireEvent.click(screen.getByText('Submit'));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/clarifications/1'),
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ answer: 'Async please' })
+      })
+    );
+  });
+
+  it('updates status via sidebar select', async () => {
+    fetchMock.mockResponse(async (req) => {
+      if (req.method === 'PATCH' && req.url.includes('/api/tasks/2')) {
+        return JSON.stringify({});
+      }
+      return JSON.stringify(mockTask);
+    });
+
+    render(TaskDetail, { taskId: 2 });
+
+    await waitFor(() => expect(screen.getByRole('combobox')).toBeInTheDocument());
+
+    const statusSelect = screen.getByRole('combobox');
+    await fireEvent.change(statusSelect, { target: { value: 'in_progress' } });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/tasks/2'),
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'in_progress' })
+      })
+    );
+  });
+
+  it('renders blocked_by and blocks dependency links', async () => {
+    fetchMock.mockResponse(JSON.stringify(mockTask));
+
+    render(TaskDetail, { taskId: 2 });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Upstream task/i)).toBeInTheDocument();
+      expect(screen.getByText(/Downstream task/i)).toBeInTheDocument();
+    });
+
+    const blockedByLink = screen.getByRole('link', { name: /#10 Upstream task/i });
+    expect(blockedByLink).toHaveAttribute('href', '/tasks/10');
+
+    const blocksLink = screen.getByRole('link', { name: /#12 Downstream task/i });
+    expect(blocksLink).toHaveAttribute('href', '/tasks/12');
   });
 });
