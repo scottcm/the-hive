@@ -464,6 +464,31 @@ mitigated by the ID format CHECK on `agent_sessions.id` (section 8.2).
 
 These checks are enforced at claim/start and completion evidence validation.
 
+**Worktree isolation.** Each agent session registers a `worktree_path` on
+`start_agent_session` — the absolute filesystem path where the agent will
+work. The coordinator enforces uniqueness: no two active sessions may share
+the same `worktree_path` (enforced by a partial unique index on
+`agent_sessions`, section 8.2). This prevents the most dangerous form of
+workspace collision — two agents writing to the same directory on different
+tasks.
+
+The coordinator does not create or provision worktrees; the orchestration
+layer (the system that spawns agents) is responsible for:
+
+1. Creating a dedicated git worktree before launching the agent
+   (e.g., `git worktree add /workspaces/agent-<session_id> main`).
+2. Setting the agent's working directory to that worktree.
+3. Passing the path to `start_agent_session(worktree_path=...)`.
+
+If `allow_shared_clone = false` (the default for write operations),
+`claim_task` additionally validates that the claiming session has a non-null
+`worktree_path`. Sessions without a `worktree_path` (e.g., manager sessions
+that only create/route tasks) cannot claim tasks that require write access.
+
+When a session ends (`end_agent_session`), the orchestration layer is
+responsible for cleaning up the worktree
+(e.g., `git worktree remove /workspaces/agent-<session_id>`).
+
 **Completion actions.** The execution policy defines what the agent does
 after gates pass and the task moves to `done`:
 
@@ -475,8 +500,11 @@ after gates pass and the task moves to `done`:
   or pipeline handles delivery).
 
 **Task type defaults:** `implementation` tasks default to
-`on_complete = push_and_pr`. `review` tasks default to `on_complete = none`
-(read-only, no branch to push). `misc` tasks default to `on_complete = none`.
+`on_complete = push_and_pr` and `allow_shared_clone = false`.
+`review` tasks default to `on_complete = none` (read-only, no branch to push)
+and `allow_shared_clone = true` (reviewers never write to the filesystem, so
+sharing a clone is safe and does not require a dedicated worktree).
+`misc` tasks default to `on_complete = none` and `allow_shared_clone = true`.
 Task creators can override these defaults in `execution_policy`.
 
 Additional completion policy keys:
@@ -613,14 +641,28 @@ CREATE TABLE hive.agent_sessions (
                      CHECK (id ~ '^[a-z0-9][a-z0-9._-]{2,63}$'),
     profile_id       text NOT NULL REFERENCES hive.agent_profiles(id) ON DELETE RESTRICT,
     status           text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'expired')),
+    worktree_path    text,
     lease_expires_at timestamptz,
     last_heartbeat_at timestamptz,
     created_at       timestamptz NOT NULL DEFAULT now()
 );
+
+-- No two active sessions may share the same worktree_path
+CREATE UNIQUE INDEX agent_sessions_worktree_active
+    ON hive.agent_sessions (worktree_path)
+    WHERE status = 'active' AND worktree_path IS NOT NULL;
 ```
 
 `ON DELETE RESTRICT` prevents deleting a profile that has sessions. Deactivate
 profiles by setting `active = false` instead.
+
+`worktree_path` records the absolute filesystem path where the agent is working.
+The partial unique index `agent_sessions_worktree_active` prevents two active
+sessions from sharing the same worktree path — if a second session attempts to
+register a path already held by an active session, the INSERT fails. This is the
+primary mechanism for preventing workspace collisions (see section 7.8).
+`worktree_path` is nullable: sessions that do not perform file operations (e.g.,
+a manager session that only creates tasks) may omit it.
 
 ### 8.3 Capability Taxonomy and Membership
 
@@ -955,7 +997,7 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 | --- | --- |
 | `register_agent_profile` | Insert a new agent profile (fails if ID already exists) |
 | `update_agent_profile` | Update an existing profile; caller `actor_id` must match `created_by` |
-| `start_agent_session` | Create/renew an active agent session |
+| `start_agent_session` | Create/renew an active agent session. Accepts optional `worktree_path` (absolute filesystem path). If provided, must be unique among active sessions (partial unique index rejects duplicates). |
 | `heartbeat_agent_session` | Refresh session lease (`lease_expires_at`). Propagates new deadline to `heartbeat_deadline` on all tasks where `claim_session_id` matches this session (§7.9). |
 | `heartbeat_task` | v1.0: no-op alias (task deadline derived from session lease). v1.1: independently extends `heartbeat_deadline`. <!-- v1.1: see V1.1_DEFERRED.md #D1 --> |
 | `end_agent_session` | Mark session inactive |
@@ -971,7 +1013,7 @@ CREATE INDEX ON hive.agent_audit_log (operation, created_at);
 | Tool | Change |
 | --- | --- |
 | `get_next_task` | Add `agent_session_id`; capability/trust/execution-policy filtering |
-| `claim_task` | Re-validate eligibility and execution-policy lease checks; issues `claim_token` bound to `claim_session_id`; sets heartbeat deadline. `claim_token` is returned only in the `claim_task` response and MUST NOT appear in list/query endpoints. |
+| `claim_task` | Re-validate eligibility and execution-policy lease checks; issues `claim_token` bound to `claim_session_id`; sets heartbeat deadline. When `allow_shared_clone = false`, rejects if the session's `worktree_path` is NULL. `claim_token` is returned only in the `claim_task` response and MUST NOT appear in list/query endpoints. |
 | `create_task` | Accept `task_type`, `parent_task_id`, `task_spec`, execution fields/policy. Sets `created_by` from caller's `actor_id` (immutable after creation). Reject if `parent_task_id` itself has a non-null `parent_task_id` (enforces single-level nesting). |
 | `update_task` | Accept routing/execution/spec fields and workflow type updates; validate `(claim_token, claim_session_id)` pair on terminal transitions |
 | `record_task_evidence` | Require active `agent_session_id` + matching `(claim_token, claim_session_id)` pair; set `actor_id` on write |
@@ -991,13 +1033,17 @@ interact through the same API surface via dashboard, CLI, or direct MCP calls.
 
 ### Agent startup (automated)
 
-1. Session starts via `start_agent_session(profile_id=...)`.
-2. Agent calls `get_next_task(agent_session_id=...)`.
-3. Agent claims with `claim_task(task_id, assigned_to=agent_session_id)`.
-4. Agent loads `task_spec` (+ project/milestone specs + resolved execution policy).
-5. If blocked: `create_clarification` routes by domain ownership.
-6. During execution, evidence writes require matching active session/claim token.
-7. On completion: evidence + handoff + review child task + G0-G5 -> `done`.
+1. Orchestration layer creates a dedicated worktree for the agent
+   (e.g., `git worktree add /workspaces/agent-<id> main`).
+2. Session starts via `start_agent_session(profile_id=..., worktree_path=...)`.
+   If `worktree_path` conflicts with an active session, the call fails.
+3. Agent calls `get_next_task(agent_session_id=...)`.
+4. Agent claims with `claim_task(task_id, assigned_to=agent_session_id)`.
+5. Agent loads `task_spec` (+ project/milestone specs + resolved execution policy).
+6. If blocked: `create_clarification` routes by domain ownership.
+7. During execution, evidence writes require matching active session/claim token.
+8. On completion: evidence + handoff + review child task + G0-G5 -> `done`.
+9. Orchestration layer cleans up worktree on session end.
 
 ### Review workflow
 

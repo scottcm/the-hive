@@ -282,7 +282,7 @@ Covers: execution policy (7.8), branch name safety, claim-time enforcement.
   `{workspace_mode: "dedicated_worktree", branch_mode: "per_task_branch",
   branch_name_template: "task/{task_id}-{agent_session_id}",
   allow_shared_clone: false, require_clean_worktree_on_claim: true}`.
-- Session S1 with valid ID format.
+- Session S1 with valid ID format and `worktree_path='/workspaces/agent-s1'`.
 
 ### Steps
 
@@ -298,6 +298,50 @@ Covers: execution policy (7.8), branch name safety, claim-time enforcement.
    S1 claims T2.
    - Assert: different branch name `task/<T2_id>-<S1_id>`.
    - Assert: no branch collision.
+
+---
+
+## UC-08a: Worktree path conflict detection
+
+Covers: worktree_path uniqueness (7.8, 8.2), session isolation, claim-time
+worktree_path validation.
+
+### Preconditions
+
+- Task T1 with `allow_shared_clone: false`.
+- Task T2 with `allow_shared_clone: false`.
+
+### Steps
+
+1. `start_agent_session(id='s1', profile_id='worker-a',
+   worktree_path='/workspaces/agent-s1')`
+   - Assert: succeeds, session S1 active with worktree_path recorded.
+
+2. `start_agent_session(id='s2', profile_id='worker-b',
+   worktree_path='/workspaces/agent-s2')`
+   - Assert: succeeds, session S2 active with different worktree_path.
+
+3. `start_agent_session(id='s3', profile_id='worker-c',
+   worktree_path='/workspaces/agent-s1')`
+   - Assert: **rejected** (worktree_path conflicts with active session S1).
+
+4. S1 claims T1.
+   - Assert: succeeds (S1 has non-null worktree_path, allow_shared_clone
+     satisfied).
+
+5. `start_agent_session(id='s4', profile_id='worker-d',
+   worktree_path=NULL)`
+   - Assert: succeeds (NULL worktree_path is allowed for manager sessions).
+
+6. S4 attempts to claim T2.
+   - Assert: **rejected** (T2 has `allow_shared_clone: false` but S4 has
+     no worktree_path).
+
+7. `end_agent_session(id='s1')` — S1 becomes inactive.
+
+8. `start_agent_session(id='s5', profile_id='worker-e',
+   worktree_path='/workspaces/agent-s1')`
+   - Assert: succeeds (S1 is no longer active, path is available).
 
 ---
 
