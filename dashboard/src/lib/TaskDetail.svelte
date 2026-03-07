@@ -47,6 +47,9 @@
   let task: Task | null = $state(null);
   let activeTab = $state<'context' | 'activity'>('context');
   let newNote = $state('');
+  let noteAuthor = $state(
+    (typeof localStorage !== 'undefined' && localStorage.getItem('hive_author')) ?? ''
+  );
   let answerDrafts = $state<Record<number, string>>({});
 
   async function loadTask() {
@@ -65,11 +68,12 @@
   );
 
   async function postNote() {
-    if (!newNote.trim()) return;
+    if (!newNote.trim() || !noteAuthor.trim()) return;
+    if (typeof localStorage !== 'undefined') localStorage.setItem('hive_author', noteAuthor);
     await fetch(`/api/tasks/${taskId}/notes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: newNote })
+      body: JSON.stringify({ author: noteAuthor, content: newNote })
     });
     newNote = '';
     void loadTask();
@@ -199,6 +203,11 @@
           {/if}
           <div class="note-input">
             <input
+              class="author-input"
+              placeholder="Your name"
+              bind:value={noteAuthor}
+            />
+            <input
               placeholder="Add a note..."
               bind:value={newNote}
             />
@@ -306,6 +315,7 @@
   .note-time { font-size: 11px; color: #6e7681; margin-left: 8px; }
   .note-input { display: flex; gap: 8px; }
   .note-input input { flex: 1; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; border-radius: 4px; padding: 8px; font-size: 13px; }
+  .note-input .author-input { flex: 0 0 120px; }
 
   button { padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; font-size: 13px; cursor: pointer; }
   button:hover { background: #30363d; }

@@ -9,7 +9,7 @@
     | { name: 'not-found' };
 
   function parseRoute(path: string): Route {
-    const taskMatch = path.match(/^\/tasks\/(\d+)/);
+    const taskMatch = path.match(/^\/tasks\/(\d+)$/);
     if (taskMatch) return { name: 'task-detail', taskId: Number(taskMatch[1]) };
     if (path === '/' || path === '') return { name: 'board' };
     return { name: 'not-found' };
